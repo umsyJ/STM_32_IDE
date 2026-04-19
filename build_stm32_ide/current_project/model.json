@@ -1,0 +1,52 @@
+{
+  "blocks": [
+    {
+      "type": "SquareWave",
+      "id": "SquareWave_1",
+      "x": -300.0,
+      "y": -50.0,
+      "params": {
+        "frequency_hz": "2.0",
+        "amplitude": "1.0",
+        "offset": "0.0",
+        "duty": "0.5"
+      }
+    },
+    {
+      "type": "GpioOut",
+      "id": "GpioOut_2",
+      "x": -50.0,
+      "y": -50.0,
+      "params": {
+        "pin": "PA5",
+        "threshold": "0.5"
+      }
+    },
+    {
+      "type": "Scope",
+      "id": "Scope_3",
+      "x": 200.0,
+      "y": -50.0,
+      "params": {
+        "max_points": "500",
+        "stream": "1"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "src_block": "SquareWave_1",
+      "src_port": "y",
+      "dst_block": "GpioOut_2",
+      "dst_port": "u"
+    },
+    {
+      "src_block": "SquareWave_1",
+      "src_port": "y",
+      "dst_block": "Scope_3",
+      "dst_port": "u0"
+    }
+  ],
+  "board": "NUCLEO-F446RE",
+  "step_ms": 1
+}
