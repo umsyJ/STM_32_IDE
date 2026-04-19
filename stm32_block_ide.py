@@ -516,13 +516,19 @@ class BlockScene(QGraphicsScene):
         else:
             self.block_selected.emit(None)
 
+    def _port_at(self, scene_pos: QPointF) -> Optional[PortItem]:
+        """Return the topmost PortItem at scene_pos, ignoring the drag wire."""
+        for item in self.items(scene_pos):
+            if isinstance(item, PortItem):
+                return item
+        return None
+
     def mouseMoveEvent(self, event):
         if self._pending_src is not None:
             self._update_drag_wire(event.scenePos())
-            # Highlight any compatible port under the cursor
-            item = self.itemAt(event.scenePos(), self.views()[0].transform())
-            if isinstance(item, PortItem) and self._is_valid_target(self._pending_src, item):
-                self._set_highlighted_port(item)
+            port = self._port_at(event.scenePos())
+            if port is not None and self._is_valid_target(self._pending_src, port):
+                self._set_highlighted_port(port)
             else:
                 self._set_highlighted_port(None)
             return
@@ -530,11 +536,11 @@ class BlockScene(QGraphicsScene):
 
     def mouseReleaseEvent(self, event):
         if self._pending_src is not None:
-            item = self.itemAt(event.scenePos(), self.views()[0].transform())
+            port = self._port_at(event.scenePos())
             src = self._pending_src
             self._cancel_drag()
-            if isinstance(item, PortItem) and item is not src:
-                self.add_connection(src, item)
+            if port is not None and port is not src:
+                self.add_connection(src, port)
             return
         super().mouseReleaseEvent(event)
 
