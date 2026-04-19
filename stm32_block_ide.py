@@ -756,6 +756,15 @@ class ScopeTab(QWidget):
         )
         bar.addWidget(self.sim_btn)
 
+        bar.addWidget(QLabel("Duration (s):"))
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setDecimals(1)
+        self.duration_spin.setRange(0.5, 600.0)
+        self.duration_spin.setSingleStep(1.0)
+        self.duration_spin.setValue(10.0)
+        self.duration_spin.setToolTip("How many seconds to simulate.")
+        bar.addWidget(self.duration_spin)
+
         bar.addSpacing(12)
         bar.addWidget(QLabel("Window (s):"))
         self.window_spin = QDoubleSpinBox()
@@ -1159,6 +1168,14 @@ class MainWindow(QMainWindow):
         self.scope_tab = ScopeTab()
         self.scope_tab.sim_btn.clicked.connect(self.on_simulate)
         self.tabs.addTab(self.scope_tab, "Scope / Serial")
+
+        # Debounce timer: re-simulate 800 ms after the last diagram change,
+        # but only when the Scope tab is visible and no serial port is open.
+        self._sim_debounce = QTimer(self)
+        self._sim_debounce.setSingleShot(True)
+        self._sim_debounce.setInterval(800)
+        self._sim_debounce.timeout.connect(self._auto_simulate)
+        self.scene.changed.connect(self._on_scene_changed)
         self.build_log = QPlainTextEdit(readOnly=True)
         self.build_log.setStyleSheet(
             "background: #0d0d0d; color: #b8e0b8; font-family: Consolas, monospace;"
@@ -1302,10 +1319,26 @@ class MainWindow(QMainWindow):
 
     # --- simulate / export / build ---------------------------------------
 
+    def _on_scene_changed(self, _=None) -> None:
+        # Restart debounce on every diagram change so we only simulate once
+        # the user stops editing.
+        if self.tabs.currentWidget() is self.scope_tab:
+            self._sim_debounce.start()
+
+    def _auto_simulate(self) -> None:
+        # Don't auto-simulate while a live serial port is streaming.
+        if self.scope_tab._reader is not None:
+            return
+        self.on_simulate()
+
     def on_simulate(self) -> None:
         model = self.scene.to_model()
+        model["board"] = self.board
+        model["step_ms"] = self.step_ms
+        duration = self.scope_tab.duration_spin.value()
         try:
-            t, sigs = simulate_model(model, duration_s=2.0, step_s=self.step_ms/1000.0)
+            t, sigs = simulate_model(model, duration_s=duration,
+                                     step_s=self.step_ms / 1000.0)
         except Exception as e:
             QMessageBox.critical(self, "Simulation error", str(e))
             return
