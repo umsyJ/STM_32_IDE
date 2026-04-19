@@ -62,7 +62,7 @@ except Exception:
     HAVE_SERIAL = False
 
 
-from code_templates import generate_project, BOARDS
+from code_templates import generate_project, BOARDS, _topo_order as _ct_topo_order
 from workspace_shared import WORKSPACE
 from matlab_workspace import MatlabWorkspace
 
@@ -177,6 +177,30 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "Reads an HC-SR04 ultrasonic range finder. Sends a 10 us trigger "
             "pulse on TRIG and times the ECHO pulse width with the DWT cycle "
             "counter. Output 'd' is distance in meters; 0 on timeout / no echo."
+        ),
+    ),
+    "Sum": BlockSpec(
+        type_name="Sum",
+        display_name="Sum",
+        color="#e74c3c",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Adds two input signals each model step. Unconnected inputs "
+            "contribute 0.0. Output 'y' = u0 + u1."
+        ),
+    ),
+    "Product": BlockSpec(
+        type_name="Product",
+        display_name="Product",
+        color="#8e44ad",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Multiplies two input signals each model step. Unconnected inputs "
+            "contribute 1.0. Output 'y' = u0 * u1."
         ),
     ),
 }
@@ -845,10 +869,26 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 else:
                     outs[(b["id"], "d")] = arr[:n]
 
-    # Second pass: propagate through wires to GpioOut / Scope inputs
+    # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
     for c in model["connections"]:
         wires[(c["dst_block"], c["dst_port"])] = (c["src_block"], c["src_port"])
+
+    # Middle pass: through blocks (Sum, Product) in topological order so that
+    # chains (e.g. Sum → Product) are resolved correctly.
+    for b in _ct_topo_order(model):
+        if b["type"] == "Sum":
+            src0 = wires.get((b["id"], "u0"))
+            src1 = wires.get((b["id"], "u1"))
+            arr0 = outs.get(src0, np.zeros(n)) if src0 else np.zeros(n)
+            arr1 = outs.get(src1, np.zeros(n)) if src1 else np.zeros(n)
+            outs[(b["id"], "y")] = arr0 + arr1
+        elif b["type"] == "Product":
+            src0 = wires.get((b["id"], "u0"))
+            src1 = wires.get((b["id"], "u1"))
+            arr0 = outs.get(src0, np.ones(n)) if src0 else np.ones(n)
+            arr1 = outs.get(src1, np.ones(n)) if src1 else np.ones(n)
+            outs[(b["id"], "y")] = arr0 * arr1
 
     display: Dict[str, np.ndarray] = {}
     for b in model["blocks"]:

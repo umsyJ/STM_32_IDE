@@ -60,6 +60,32 @@ The `max_points` parameter caps how many samples the host-side plot retains, whi
 
 Note that streaming has an overhead: each step the firmware does a `snprintf` and a UART transmit. If you crank the model step rate up to 1 ms (the maximum) and stream three channels with %.4f formatting, you're producing about 50 KB/s of UART traffic, which is well within the 11.5 KB/s the link can carry only if you slow the step rate down. As a rule of thumb, keep `step_ms` at 5 or higher when streaming, or only enable streaming when you actively need to look at the data.
 
+## Sum
+
+Adds two input signals together each model step. Useful for combining sensor readings, mixing signals, or adding a DC offset to a waveform.
+
+Inputs: `u0`, `u1` — any two float signals.
+Outputs: `y` — the scalar sum `u0 + u1`.
+
+Parameters: none.
+
+An unconnected input defaults to 0.0, so wiring only `u0` is a valid way to use the block as a unity-gain pass-through. The block has no state and introduces no delay — the output is computed in the same step as the inputs.
+
+Generated C assigns `sig_<id>_y = <u0_expr> + <u1_expr>;` where each expression is either the upstream signal variable or the literal `0.0f` if that port has no wire. Because the block produces an output signal, it can be chained: wire a Sum into a GpioOut threshold comparison, into a Scope channel, or into another Sum or Product block.
+
+## Product
+
+Multiplies two input signals together each model step. Useful for amplitude modulation (multiply a SquareWave by an envelope), gating (multiply a sensor reading by a switch output), or building gain-scheduled control laws.
+
+Inputs: `u0`, `u1` — any two float signals.
+Outputs: `y` — the scalar product `u0 * u1`.
+
+Parameters: none.
+
+An unconnected input defaults to 1.0 (the multiplicative identity), so wiring only `u0` leaves the output equal to the input — a no-op pass-through, unlike Sum whose default is 0.0. As with Sum, there is no state or delay, and the block can be chained freely.
+
+Generated C assigns `sig_<id>_y = <u0_expr> * <u1_expr>;` where unconnected ports become the literal `1.0f`. A common pattern is a SquareWave driving `u0` and a GpioIn (button) driving `u1` — the product is the wave when the button is held and zero otherwise, effectively gating the signal.
+
 ## Workspace expressions in parameters
 
 Every parameter field accepts an expression, not just a literal. The expression is evaluated against the Python workspace at code generation time, with `numpy` available as `np` and the `math` module available as `math`. This is the mechanism behind reusable models: define `f_sample = 1000` and `pwm_period = 1 / 50` once in the workspace, then reference those names from a dozen blocks.
@@ -68,4 +94,4 @@ A parameter expression is re-evaluated every time you click Build or Run, so cha
 
 ## Things the current set deliberately doesn't include
 
-Several block categories are obvious next steps but aren't shipped yet. PWM output (hardware timer driven), ADC input, I2C/SPI peripherals, sum/gain/integrator math blocks, and a Bus block for grouping signals are all on the natural extension path. The block model in the IDE is open: a new block type is roughly a `BlockSpec` entry in `BLOCK_CATALOG`, a host-side simulation case in `simulate_model`, and a code-generation case in `_emit_step`. The same three-part structure applies whether you're adding a math operator or a peripheral driver.
+Several block categories are obvious next steps but aren't shipped yet. PWM output (hardware timer driven), ADC input, I2C/SPI peripherals, gain/integrator math blocks, and a Bus block for grouping signals are all on the natural extension path. The block model in the IDE is open: a new block type is roughly a `BlockSpec` entry in `BLOCK_CATALOG`, a host-side simulation case in `simulate_model`, and a code-generation case in `_emit_step`. The same three-part structure applies whether you're adding a math operator or a peripheral driver.

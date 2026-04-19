@@ -126,6 +126,8 @@ def _emit_decls(blocks: List[dict]) -> str:
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "Ultrasonic":
             decls.append(f"static float {_sig_var(b['id'],'d')} = 0.0f;")
+        elif b["type"] in ("Sum", "Product"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         # GpioOut & Scope: no signal output
     return "\n".join(decls)
 
@@ -308,6 +310,17 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
                     if stream:
                         streamed.append(get_input(bid, port))
             lines.append(f"    /* block {bid}: Scope ({'stream' if stream else 'no stream'}) */")
+        elif t == "Sum":
+            u0 = get_input(bid, "u0")   # 0.0f if unconnected
+            u1 = get_input(bid, "u1")
+            lines.append(f"    /* block {bid}: Sum */")
+            lines.append(f"    {_sig_var(bid,'y')} = {u0} + {u1};")
+        elif t == "Product":
+            # Unconnected inputs must be 1.0f (multiplicative identity).
+            u0 = _sig_var(*wires[(bid, "u0")]) if (bid, "u0") in wires else "1.0f"
+            u1 = _sig_var(*wires[(bid, "u1")]) if (bid, "u1") in wires else "1.0f"
+            lines.append(f"    /* block {bid}: Product */")
+            lines.append(f"    {_sig_var(bid,'y')} = {u0} * {u1};")
         elif t == "Ultrasonic":
             trig = p.get("trig_pin", "PA0")
             echo = p.get("echo_pin", "PA1")
