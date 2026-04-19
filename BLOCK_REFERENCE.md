@@ -101,6 +101,23 @@ An unconnected input defaults to 1.0 (the multiplicative identity), so wiring on
 
 Generated C assigns `sig_<id>_y = <u0_expr> * <u1_expr>;` where unconnected ports become the literal `1.0f`. A common pattern is a SquareWave driving `u0` and a GpioIn (button) driving `u1` — the product is the wave when the button is held and zero otherwise, effectively gating the signal.
 
+## To Workspace
+
+Captures an input signal during host simulation and writes it into the Python workspace as a named NumPy array, analogous to Simulink's To Workspace block. Use it whenever you want to do post-processing — FFT, statistics, custom plots — on data you would otherwise only see in the Scope tab.
+
+Inputs: `u` — any float signal.
+Outputs: none (this is a sink block).
+
+Parameters:
+
+The `variable_name` parameter controls which name the captured array is given in the Python workspace. The default is `yout`. After you click Simulate, you can type `yout` in the Python Workspace command line and press Enter to inspect the array, or use it in any expression (`np.fft.fft(yout)`, `yout.mean()`, etc.).
+
+The `max_points` parameter caps how many samples are retained — when the simulation produces more than this many steps, only the most recent `max_points` are saved. The `decimation` parameter stores only every Nth sample (`1` keeps everything, `10` keeps one sample in ten), which is useful when the step rate is very fast and you only need a coarse record. The `save_time` parameter (default `1`) also writes a companion array called `<variable_name>_t` containing the time stamp of each saved sample, so you can plot `plt.plot(yout_t, yout)` immediately without computing time by hand.
+
+The block also appears in the Simulate Scope tab plot (labelled `<variable_name> [<id>]`) so you can see at a glance which portion of the signal was captured and whether decimation changed the shape you expected.
+
+On the MCU this block generates no code whatsoever — it exists purely for simulation-time analysis. If you also need live streaming from the board, connect the same signal to a Scope block with `stream = 1`.
+
 ## Workspace expressions in parameters
 
 Every parameter field accepts an expression, not just a literal. The expression is evaluated against the Python workspace at code generation time, with `numpy` available as `np` and the `math` module available as `math`. This is the mechanism behind reusable models: define `f_sample = 1000` and `pwm_period = 1 / 50` once in the workspace, then reference those names from a dozen blocks.
