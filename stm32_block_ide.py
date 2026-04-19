@@ -750,6 +750,20 @@ class ScopeTab(QWidget):
         self.connect_btn.clicked.connect(self.toggle_connect)
         bar.addWidget(self.connect_btn)
 
+        bar.addSpacing(8)
+        bar.addWidget(QLabel("Window (s):"))
+        self.window_spin = QDoubleSpinBox()
+        self.window_spin.setDecimals(1)
+        self.window_spin.setRange(0.5, 600.0)
+        self.window_spin.setSingleStep(0.5)
+        self.window_spin.setValue(5.0)
+        self.window_spin.setToolTip(
+            "Length of the rolling time window shown on the scope, in seconds. "
+            "Samples older than this are dropped from the view."
+        )
+        self.window_spin.valueChanged.connect(self._on_window_changed)
+        bar.addWidget(self.window_spin)
+
         # Visual separator between live serial section and simulate section.
         div = QFrame()
         div.setFrameShape(QFrame.VLine)
@@ -773,20 +787,6 @@ class ScopeTab(QWidget):
         self.duration_spin.setValue(10.0)
         self.duration_spin.setToolTip("How many seconds to simulate.")
         bar.addWidget(self.duration_spin)
-
-        bar.addSpacing(12)
-        bar.addWidget(QLabel("Window (s):"))
-        self.window_spin = QDoubleSpinBox()
-        self.window_spin.setDecimals(1)
-        self.window_spin.setRange(0.5, 600.0)
-        self.window_spin.setSingleStep(0.5)
-        self.window_spin.setValue(5.0)
-        self.window_spin.setToolTip(
-            "Length of the rolling time window shown on the scope, in seconds. "
-            "Samples older than this are dropped from the view."
-        )
-        self.window_spin.valueChanged.connect(self._on_window_changed)
-        bar.addWidget(self.window_spin)
 
         self.auto_y_check = QCheckBox("Auto-Y")
         self.auto_y_check.setChecked(True)
