@@ -253,12 +253,20 @@ class PortItem(QGraphicsRectItem):
         self.direction = direction
         self.index = index
         self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CrossCursor)
+        self.setToolTip(f"{'▶ out' if direction == 'out' else '◀ in'}: {name}")
 
     def hoverEnterEvent(self, ev):
         self.setBrush(QBrush(QColor("#ffd54a")))
+        self.setRect(-PORT_RADIUS * 1.5, -PORT_RADIUS * 1.5,
+                     PORT_RADIUS * 3, PORT_RADIUS * 3)
 
     def hoverLeaveEvent(self, ev):
         self.setBrush(QBrush(QColor("#222")))
+        self.setRect(-PORT_RADIUS, -PORT_RADIUS, PORT_RADIUS * 2, PORT_RADIUS * 2)
+
+    def highlight_as_target(self, on: bool) -> None:
+        self.setBrush(QBrush(QColor("#00e676") if on else QColor("#222")))
 
     def scenePos(self) -> QPointF:  # override for clarity
         return self.mapToScene(self.rect().center())
@@ -393,6 +401,8 @@ class BlockScene(QGraphicsScene):
         self.connections: List[Connection] = []
         self.connection_items: List[ConnectionItem] = []
         self._pending_src: Optional[PortItem] = None
+        self._drag_wire: Optional[QGraphicsPathItem] = None
+        self._highlighted_port: Optional[PortItem] = None
         self._id_counter = 1
 
     # --- block management -------------------------------------------------
@@ -455,25 +465,76 @@ class BlockScene(QGraphicsScene):
 
     # --- mouse handling (wiring + selection) ------------------------------
 
+    def _is_valid_target(self, src: PortItem, dst: PortItem) -> bool:
+        return dst.block is not src.block and dst.direction != src.direction
+
+    def _set_highlighted_port(self, port: Optional[PortItem]) -> None:
+        if self._highlighted_port is port:
+            return
+        if self._highlighted_port is not None:
+            self._highlighted_port.highlight_as_target(False)
+        self._highlighted_port = port
+        if port is not None:
+            port.highlight_as_target(True)
+
+    def _update_drag_wire(self, cursor: QPointF) -> None:
+        if self._drag_wire is None or self._pending_src is None:
+            return
+        p1 = self._pending_src.scenePos()
+        p2 = cursor
+        dx = max(40.0, abs(p2.x() - p1.x()) * 0.5)
+        path = QPainterPath(p1)
+        path.cubicTo(
+            QPointF(p1.x() + dx, p1.y()),
+            QPointF(p2.x() - dx, p2.y()),
+            p2,
+        )
+        self._drag_wire.setPath(path)
+
+    def _cancel_drag(self) -> None:
+        if self._drag_wire is not None:
+            self.removeItem(self._drag_wire)
+            self._drag_wire = None
+        self._set_highlighted_port(None)
+        self._pending_src = None
+
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
         if isinstance(item, PortItem) and event.button() == Qt.LeftButton:
             self._pending_src = item
+            wire = QGraphicsPathItem()
+            wire.setPen(QPen(QColor("#ffd54a"), 2, Qt.DashLine))
+            wire.setZValue(10)
+            self.addItem(wire)
+            self._drag_wire = wire
+            self._update_drag_wire(event.scenePos())
             return
         super().mousePressEvent(event)
-        # Notify panel of selected block, if any
         sel = self.selectedItems()
         if sel and isinstance(sel[0], BlockItem):
             self.block_selected.emit(sel[0])
         else:
             self.block_selected.emit(None)
 
+    def mouseMoveEvent(self, event):
+        if self._pending_src is not None:
+            self._update_drag_wire(event.scenePos())
+            # Highlight any compatible port under the cursor
+            item = self.itemAt(event.scenePos(), self.views()[0].transform())
+            if isinstance(item, PortItem) and self._is_valid_target(self._pending_src, item):
+                self._set_highlighted_port(item)
+            else:
+                self._set_highlighted_port(None)
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
         if self._pending_src is not None:
             item = self.itemAt(event.scenePos(), self.views()[0].transform())
-            if isinstance(item, PortItem) and item is not self._pending_src:
-                self.add_connection(self._pending_src, item)
-            self._pending_src = None
+            src = self._pending_src
+            self._cancel_drag()
+            if isinstance(item, PortItem) and item is not src:
+                self.add_connection(src, item)
             return
         super().mouseReleaseEvent(event)
 
