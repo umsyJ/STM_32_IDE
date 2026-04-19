@@ -38,7 +38,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAction, QApplication, QComboBox, QDockWidget, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QGraphicsItem, QGraphicsLineItem,
+    QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsLineItem,
     QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
@@ -749,6 +749,15 @@ class ScopeTab(QWidget):
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self.toggle_connect)
         bar.addWidget(self.connect_btn)
+
+        # Visual separator between live serial section and simulate section.
+        div = QFrame()
+        div.setFrameShape(QFrame.VLine)
+        div.setFrameShadow(QFrame.Sunken)
+        bar.addSpacing(6)
+        bar.addWidget(div)
+        bar.addSpacing(6)
+
         self.sim_btn = QPushButton("Simulate Model")
         self.sim_btn.setToolTip(
             "Run the block model numerically in Python (no hardware) "
@@ -816,6 +825,7 @@ class ScopeTab(QWidget):
         self._data: Dict[int, List[Tuple[float, float]]] = {}
         self._max_pts = 200_000  # hard cap per channel; time window is the primary trim
         self._dirty = False      # set when new samples arrived; repaint clears it
+        self._sim_mode = False   # True while showing simulation; cleared by incoming serial data
 
         # Decouple sample-in rate from repaint rate. The MCU streams at up to
         # 1 kHz; the GUI only needs ~30 fps to look smooth and per-sample
@@ -861,10 +871,21 @@ class ScopeTab(QWidget):
             self._reader.wait(1000)
             self._reader = None
             self.connect_btn.setText("Connect")
+            # Clear stale serial data so it can't overwrite a subsequent simulation.
+            self._data.clear()
+            self._dirty = False
+            if HAVE_PYQTGRAPH:
+                self.plot.clear()
+            self._curves = []
 
     def _on_sample(self, t: float, channels: List[float]) -> None:
         # Hot path: called on every serial line (up to 1 kHz). Do the minimum
         # work — just append. Trimming and redraw happen in the 30 Hz timer.
+        if self._sim_mode:
+            # First real sample after a simulation — switch back to live view.
+            self._sim_mode = False
+            self.plot.clear()
+            self._curves = []
         for i, v in enumerate(channels):
             buf = self._data.setdefault(i, [])
             buf.append((t, v))
