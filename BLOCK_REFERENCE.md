@@ -4,6 +4,21 @@ Detailed documentation of every block currently shipped with the IDE: what it do
 
 A few conventions apply to all blocks. Every block carries its own automatically assigned ID (something like `SquareWave_3`) which is used internally and shown beneath the block's display name. Every parameter is interpreted as a Python expression evaluated against the workspace, so you can write either a literal number (`2.0`) or any expression that resolves to one (`f_sample / 4`). The model runs at the step rate set in the toolbar — every step, all blocks execute once in topological (data-flow) order.
 
+## Constant
+
+Outputs a fixed float value every model step. The simplest source block — no state, no hardware.
+
+Inputs: none.
+Outputs: `y` — the configured constant value, every step.
+
+Parameters:
+
+The `value` parameter is any workspace expression that resolves to a number — a literal (`3.14`), a variable (`threshold`), or a formula (`Vcc / 2`). It is evaluated once at code-generation time and baked into the firmware as a float literal. To change it you re-generate and re-flash; there is no runtime adjustment.
+
+Typical uses: supply a fixed threshold to a GpioOut block instead of using its built-in threshold parameter; provide a DC offset to a Sum block; scale a sensor reading by multiplying through a Product block.
+
+Generated C is a single assignment per step: `sig_<id>_y = <value>f;`. No state variable, no accumulator.
+
 ## Square Wave
 
 Generates a square wave at the model step rate. Useful as a clock for blinking, a test stimulus, or any time you need an alternating logic-level signal without setting up a hardware timer.

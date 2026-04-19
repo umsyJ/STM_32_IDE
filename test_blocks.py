@@ -131,6 +131,10 @@ def _ultra(bid="U", trig="PA0", echo="PA1", period="60", timeout="30000"):
     }
 
 
+def _const(bid="K", value="1.0"):
+    return {"type": "Constant", "id": bid, "x": 0, "y": 0, "params": {"value": value}}
+
+
 def _sum(bid="SM"):
     return {"type": "Sum", "id": bid, "x": 0, "y": 0, "params": {}}
 
@@ -152,7 +156,8 @@ def _wire(src_bid, src_port, dst_bid, dst_port):
 
 
 def test_catalog_has_all_known_types():
-    required = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic"}
+    required = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
+                "Sum", "Product", "Constant"}
     missing = required - set(BLOCK_CATALOG.keys())
     assert not missing, f"missing block types: {missing}"
 
@@ -1510,9 +1515,111 @@ def test_topo_order_product_after_its_sources():
     assert ids.index("B") < ids.index("P1")
 
 
-def test_catalog_now_has_seven_block_types():
-    expected = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic", "Sum", "Product"}
+def test_catalog_now_has_eight_block_types():
+    expected = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
+                "Sum", "Product", "Constant"}
     assert set(BLOCK_CATALOG.keys()) == expected
+
+
+# ---------------------------------------------------------------------------
+# 18. Constant block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_constant_block():
+    assert "Constant" in BLOCK_CATALOG
+
+
+def test_constant_spec_has_no_inputs_and_one_output():
+    spec = BLOCK_CATALOG["Constant"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_constant_spec_has_value_param():
+    assert "value" in BLOCK_CATALOG["Constant"].params
+
+
+def test_constant_has_valid_color():
+    color = BLOCK_CATALOG["Constant"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_emit_decls_constant_declares_output():
+    d = _emit_decls([_const("K")])
+    assert "sig_K_y" in d
+    assert "phase_K" not in d
+
+
+def test_emit_step_constant_assigns_value():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_const("K", value="2.5")], {}, FakeWorkspace(), 1, board)
+    assert "sig_K_y" in step
+    assert "2.5" in step
+
+
+def test_emit_step_constant_no_state_update():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_const("K")], {}, FakeWorkspace(), 1, board)
+    # Should be a simple assignment, no phase or counter
+    assert "phase_K" not in step
+    assert "cnt_K" not in step
+
+
+def test_simulate_constant_outputs_fixed_value():
+    model = _model([_const("K", value="3.7"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["S.u0"]
+    assert abs(float(y.mean()) - 3.7) < 1e-6
+    assert abs(float(y.min()) - 3.7) < 1e-6
+
+
+def test_simulate_constant_zero():
+    model = _model([_const("K", value="0.0"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert float(sigs["S.u0"].sum()) == 0.0
+
+
+def test_simulate_constant_negative():
+    model = _model([_const("K", value="-5.0"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["S.u0"].mean()) - (-5.0)) < 1e-6
+
+
+def test_simulate_constant_plus_squarewave_via_sum():
+    # Constant 2.0 + SquareWave (0/1, 50% duty) → mean ≈ 2.5
+    model = _model(
+        [_const("K", value="2.0"), _sw("W", duty="0.5"), _sum("S1"), _scope("SC")],
+        [
+            _wire("K", "y", "S1", "u0"),
+            _wire("W", "y", "S1", "u1"),
+            _wire("S1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 2.5) < 0.05
+
+
+def test_generate_project_constant_block_in_main_c():
+    model = _model([_const("K", value="1.5"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_K_y" in c
+        assert "1.5" in c
+
+
+def test_topo_order_constant_before_consumers():
+    model = _model(
+        [_sum("S1"), _const("K")],
+        [_wire("K", "y", "S1", "u0")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("K") < ids.index("S1")
 
 
 # ---------------------------------------------------------------------------

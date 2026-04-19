@@ -122,6 +122,8 @@ def _emit_decls(blocks: List[dict]) -> str:
         if b["type"] == "SquareWave":
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float phase_{b['id']} = 0.0f;")
+        elif b["type"] == "Constant":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "GpioIn":
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "Ultrasonic":
@@ -275,7 +277,11 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
         bid = b["id"]
         t = b["type"]
         p = b["params"]
-        if t == "SquareWave":
+        if t == "Constant":
+            val = num(p["value"], 0.0)
+            lines.append(f"    /* block {bid}: Constant */")
+            lines.append(f"    {_sig_var(bid,'y')} = {val};")
+        elif t == "SquareWave":
             f = num(p["frequency_hz"], 1.0)
             A = num(p["amplitude"], 1.0)
             off = num(p["offset"], 0.0)

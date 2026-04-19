@@ -179,6 +179,19 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "counter. Output 'd' is distance in meters; 0 on timeout / no echo."
         ),
     ),
+    "Constant": BlockSpec(
+        type_name="Constant",
+        display_name="Constant",
+        color="#c0392b",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "value": ("1.0", "Constant output value (may be a workspace expression)"),
+        },
+        description=(
+            "Outputs a fixed float value every model step. "
+            "Use to set thresholds, scale factors, or any fixed signal."
+        ),
+    ),
     "Sum": BlockSpec(
         type_name="Sum",
         display_name="Sum",
@@ -953,6 +966,9 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             phase = (t * f) % 1.0
             y = np.where(phase < duty, A, off)
             outs[(b["id"], "y")] = y
+        elif b["type"] == "Constant":
+            val = pval(b["params"]["value"])
+            outs[(b["id"], "y")] = np.full(n, val)
         elif b["type"] == "GpioIn":
             override = WORKSPACE.globals.get(f"gpioin_{b['id']}")
             if override is None:
