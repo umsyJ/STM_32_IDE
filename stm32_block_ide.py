@@ -732,11 +732,24 @@ class SerialReader(QThread):
         self._stop.set()
 
 
-class ScopeTab(QWidget):
+def _make_plot_widget():
+    if not HAVE_PYQTGRAPH:
+        return None
+    pw = pg.PlotWidget()
+    pw.setBackground("#1e1e1e")
+    pw.showGrid(x=True, y=True, alpha=0.3)
+    pw.addLegend()
+    pw.setClipToView(True)
+    pw.setDownsampling(auto=True, mode="peak")
+    return pw
+
+
+class LiveScopeTab(QWidget):
+    """Scope tab for live serial data from the MCU."""
 
     def __init__(self):
         super().__init__()
-        self.layout_ = QVBoxLayout(self)
+        lay = QVBoxLayout(self)
 
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Port:"))
@@ -749,7 +762,6 @@ class ScopeTab(QWidget):
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self.toggle_connect)
         bar.addWidget(self.connect_btn)
-
         bar.addSpacing(8)
         bar.addWidget(QLabel("Window (s):"))
         self.window_spin = QDoubleSpinBox()
@@ -757,93 +769,41 @@ class ScopeTab(QWidget):
         self.window_spin.setRange(0.5, 600.0)
         self.window_spin.setSingleStep(0.5)
         self.window_spin.setValue(5.0)
-        self.window_spin.setToolTip(
-            "Length of the rolling time window shown on the scope, in seconds. "
-            "Samples older than this are dropped from the view."
-        )
+        self.window_spin.setToolTip("Rolling time window displayed, in seconds.")
         self.window_spin.valueChanged.connect(self._on_window_changed)
         bar.addWidget(self.window_spin)
-
-        # Visual separator between live serial section and simulate section.
-        div = QFrame()
-        div.setFrameShape(QFrame.VLine)
-        div.setFrameShadow(QFrame.Sunken)
-        bar.addSpacing(6)
-        bar.addWidget(div)
-        bar.addSpacing(6)
-
-        self.sim_btn = QPushButton("Simulate Model")
-        self.sim_btn.setToolTip(
-            "Run the block model numerically in Python (no hardware) "
-            "and display the resulting waveforms in the scope."
-        )
-        bar.addWidget(self.sim_btn)
-
-        bar.addWidget(QLabel("Duration (s):"))
-        self.duration_spin = QDoubleSpinBox()
-        self.duration_spin.setDecimals(1)
-        self.duration_spin.setRange(0.5, 600.0)
-        self.duration_spin.setSingleStep(1.0)
-        self.duration_spin.setValue(10.0)
-        self.duration_spin.setToolTip("How many seconds to simulate.")
-        bar.addWidget(self.duration_spin)
-
         self.auto_y_check = QCheckBox("Auto-Y")
         self.auto_y_check.setChecked(True)
-        self.auto_y_check.setToolTip(
-            "Rescale the Y axis on every update so the visible samples "
-            "fill the plot. Uncheck to freeze the Y range at its last value."
-        )
         self.auto_y_check.toggled.connect(lambda _: self._repaint())
         bar.addWidget(self.auto_y_check)
-
         bar.addStretch(1)
-        self.layout_.addLayout(bar)
+        lay.addLayout(bar)
 
-        if HAVE_PYQTGRAPH:
-            self.plot = pg.PlotWidget()
-            self.plot.setBackground("#1e1e1e")
-            self.plot.showGrid(x=True, y=True, alpha=0.3)
-            self.plot.addLegend()
-            # Render only data inside the visible X range, and auto-downsample
-            # when there are more points than pixels. Keeps repaint cheap even
-            # with a multi-second window at 1 kHz sample rate.
-            self.plot.setClipToView(True)
-            self.plot.setDownsampling(auto=True, mode="peak")
-            self.layout_.addWidget(self.plot, 1)
-            self._curves: List[pg.PlotDataItem] = []
+        self.plot = _make_plot_widget()
+        if self.plot:
+            lay.addWidget(self.plot, 1)
+            self._curves: List = []
         else:
-            self.plot = None
-            self.layout_.addWidget(QLabel(
-                "pyqtgraph is not installed — install it to see waveform plots."
-            ))
+            lay.addWidget(QLabel("pyqtgraph is not installed."))
 
         self.status_lbl = QLabel("idle")
-        self.layout_.addWidget(self.status_lbl)
+        lay.addWidget(self.status_lbl)
 
         self._reader: Optional[SerialReader] = None
         self._data: Dict[int, List[Tuple[float, float]]] = {}
-        self._max_pts = 200_000  # hard cap per channel; time window is the primary trim
-        self._dirty = False      # set when new samples arrived; repaint clears it
-        self._sim_mode = False   # True while showing simulation; cleared by incoming serial data
+        self._max_pts = 200_000
+        self._dirty = False
 
-        # Decouple sample-in rate from repaint rate. The MCU streams at up to
-        # 1 kHz; the GUI only needs ~30 fps to look smooth and per-sample
-        # repaints starve the Qt event loop (the terminal PuTTY doesn't redraw
-        # a plot, which is why it used to appear faster than the scope).
         self._repaint_timer = QTimer(self)
-        self._repaint_timer.setInterval(33)  # ~30 Hz
+        self._repaint_timer.setInterval(33)
         self._repaint_timer.timeout.connect(self._tick_repaint)
         self._repaint_timer.start()
 
     def _on_window_changed(self, _val: float) -> None:
-        # Trim existing data to the new window and redraw immediately so the
-        # user sees the effect without waiting for the next sample.
         if not self._data:
             return
         t_latest = max((d[-1][0] for d in self._data.values() if d), default=0.0)
-        win = self.window_spin.value()
-        t_min = t_latest - win
+        t_min = t_latest - self.window_spin.value()
         for i in list(self._data.keys()):
             self._data[i] = [p for p in self._data[i] if p[0] >= t_min]
         self._repaint()
@@ -871,21 +831,13 @@ class ScopeTab(QWidget):
             self._reader.wait(1000)
             self._reader = None
             self.connect_btn.setText("Connect")
-            # Clear stale serial data so it can't overwrite a subsequent simulation.
             self._data.clear()
             self._dirty = False
-            if HAVE_PYQTGRAPH:
+            if self.plot:
                 self.plot.clear()
             self._curves = []
 
     def _on_sample(self, t: float, channels: List[float]) -> None:
-        # Hot path: called on every serial line (up to 1 kHz). Do the minimum
-        # work — just append. Trimming and redraw happen in the 30 Hz timer.
-        if self._sim_mode:
-            # First real sample after a simulation — switch back to live view.
-            self._sim_mode = False
-            self.plot.clear()
-            self._curves = []
         for i, v in enumerate(channels):
             buf = self._data.setdefault(i, [])
             buf.append((t, v))
@@ -897,69 +849,96 @@ class ScopeTab(QWidget):
         if not self._dirty:
             return
         self._dirty = False
-        # Trim everything outside the rolling time window before drawing.
         if self._data:
             t_latest = max((d[-1][0] for d in self._data.values() if d), default=0.0)
             t_min = t_latest - self.window_spin.value()
             for i, buf in self._data.items():
                 if buf and buf[0][0] < t_min:
-                    # Linear trim is fine at 30 Hz.
-                    cut = 0
-                    for j, (tj, _) in enumerate(buf):
-                        if tj >= t_min:
-                            cut = j
-                            break
-                    else:
-                        cut = len(buf)
+                    cut = next((j for j, (tj, _) in enumerate(buf) if tj >= t_min),
+                               len(buf))
                     if cut > 0:
                         del buf[:cut]
         self._repaint()
 
     def _repaint(self) -> None:
-        if not HAVE_PYQTGRAPH:
+        if not self.plot:
             return
-        # (Re)create one curve per channel
         while len(self._curves) < len(self._data):
             color = pg.intColor(len(self._curves), hues=8)
-            c = self.plot.plot(pen=pg.mkPen(color, width=2),
-                               name=f"ch{len(self._curves)}")
-            self._curves.append(c)
+            self._curves.append(self.plot.plot(pen=pg.mkPen(color, width=2),
+                                               name=f"ch{len(self._curves)}"))
         t_latest = 0.0
-        y_min = float("inf")
-        y_max = float("-inf")
+        y_min, y_max = float("inf"), float("-inf")
         for i, data in self._data.items():
             xs = [p[0] for p in data]
             ys = [p[1] for p in data]
             self._curves[i].setData(xs, ys)
-            if xs and xs[-1] > t_latest:
-                t_latest = xs[-1]
+            if xs:
+                t_latest = max(t_latest, xs[-1])
             if ys:
                 y_min = min(y_min, min(ys))
                 y_max = max(y_max, max(ys))
-        # Pin the visible X range to the rolling window so the plot scrolls.
         if t_latest > 0.0:
             win = self.window_spin.value()
             self.plot.setXRange(max(0.0, t_latest - win), t_latest, padding=0)
-        # Auto-scale Y to the samples currently in view, with a small margin so
-        # peaks don't hug the plot edge. If the trace is flat (y_min == y_max),
-        # give it an arbitrary +/- 1 so you can still see the line.
         if self.auto_y_check.isChecked() and y_max >= y_min:
             if y_max == y_min:
                 pad = 1.0 if y_max == 0.0 else abs(y_max) * 0.1 + 1e-6
                 self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
             else:
                 span = y_max - y_min
-                margin = span * 0.08
-                self.plot.setYRange(y_min - margin, y_max + margin, padding=0)
+                self.plot.setYRange(y_min - span * 0.08, y_max + span * 0.08, padding=0)
+
+
+class SimScopeTab(QWidget):
+    """Scope tab for host-side simulation results."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        self.sim_btn = QPushButton("Simulate Model")
+        self.sim_btn.setToolTip("Run the block model in Python and plot the result.")
+        bar.addWidget(self.sim_btn)
+        bar.addWidget(QLabel("Duration (s):"))
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setDecimals(1)
+        self.duration_spin.setRange(0.5, 600.0)
+        self.duration_spin.setSingleStep(1.0)
+        self.duration_spin.setValue(10.0)
+        self.duration_spin.setToolTip("How many seconds to simulate.")
+        bar.addWidget(self.duration_spin)
+        self.auto_y_check = QCheckBox("Auto-Y")
+        self.auto_y_check.setChecked(True)
+        bar.addWidget(self.auto_y_check)
+        bar.addStretch(1)
+        lay.addLayout(bar)
+
+        self.plot = _make_plot_widget()
+        if self.plot:
+            lay.addWidget(self.plot, 1)
+            self._curves: List = []
+        else:
+            lay.addWidget(QLabel("pyqtgraph is not installed."))
 
     def show_simulation(self, times: np.ndarray, signals: Dict[str, np.ndarray]) -> None:
-        if not HAVE_PYQTGRAPH:
+        if not self.plot:
             return
         self.plot.clear()
         self._curves = []
-        for name, ys in signals.items():
-            c = self.plot.plot(times, ys, pen=pg.mkPen(width=2), name=name)
-            self._curves.append(c)
+        colors = [pg.mkPen(pg.intColor(i, hues=8), width=2) for i in range(len(signals))]
+        for (name, ys), pen in zip(signals.items(), colors):
+            self._curves.append(self.plot.plot(times, ys, pen=pen, name=name))
+        if self.auto_y_check.isChecked() and self._curves:
+            all_y = np.concatenate(list(signals.values()))
+            y_min, y_max = float(all_y.min()), float(all_y.max())
+            if y_min == y_max:
+                pad = 1.0 if y_max == 0.0 else abs(y_max) * 0.1 + 1e-6
+                self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
+            else:
+                span = y_max - y_min
+                self.plot.setYRange(y_min - span * 0.08, y_max + span * 0.08, padding=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1186,12 +1165,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(editor_widget, "Block Diagram")
         self.python_tab = MatlabWorkspace(root_dir=Path.cwd())
         self.tabs.addTab(self.python_tab, "Python Workspace")
-        self.scope_tab = ScopeTab()
-        self.scope_tab.sim_btn.clicked.connect(self.on_simulate)
-        self.tabs.addTab(self.scope_tab, "Scope / Serial")
+        self.live_scope_tab = LiveScopeTab()
+        self.tabs.addTab(self.live_scope_tab, "Live Scope")
+        self.sim_scope_tab = SimScopeTab()
+        self.sim_scope_tab.sim_btn.clicked.connect(self.on_simulate)
+        self.tabs.addTab(self.sim_scope_tab, "Simulate Scope")
 
-        # Debounce timer: re-simulate 800 ms after the last diagram change,
-        # but only when the Scope tab is visible and no serial port is open.
+        # Debounce timer: re-simulate 800 ms after the last diagram change
+        # when the Simulate Scope tab is visible.
         self._sim_debounce = QTimer(self)
         self._sim_debounce.setSingleShot(True)
         self._sim_debounce.setInterval(800)
@@ -1341,30 +1322,25 @@ class MainWindow(QMainWindow):
     # --- simulate / export / build ---------------------------------------
 
     def _on_scene_changed(self, _=None) -> None:
-        # Restart debounce on every diagram change so we only simulate once
-        # the user stops editing.
-        if self.tabs.currentWidget() is self.scope_tab:
+        if self.tabs.currentWidget() is self.sim_scope_tab:
             self._sim_debounce.start()
 
     def _auto_simulate(self) -> None:
-        # Don't auto-simulate while a live serial port is streaming.
-        if self.scope_tab._reader is not None:
-            return
         self.on_simulate()
 
     def on_simulate(self) -> None:
         model = self.scene.to_model()
         model["board"] = self.board
         model["step_ms"] = self.step_ms
-        duration = self.scope_tab.duration_spin.value()
+        duration = self.sim_scope_tab.duration_spin.value()
         try:
             t, sigs = simulate_model(model, duration_s=duration,
                                      step_s=self.step_ms / 1000.0)
         except Exception as e:
             QMessageBox.critical(self, "Simulation error", str(e))
             return
-        self.scope_tab.show_simulation(t, sigs)
-        self.tabs.setCurrentWidget(self.scope_tab)
+        self.sim_scope_tab.show_simulation(t, sigs)
+        self.tabs.setCurrentWidget(self.sim_scope_tab)
 
     def export_c(self) -> None:
         target = QFileDialog.getExistingDirectory(self, "Export project to folder")
