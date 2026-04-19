@@ -1516,8 +1516,13 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    expected = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
-                "Sum", "Product", "Constant"}
+    # Originally 8 blocks; extended to 13 with ToWorkspace, Step, Integrator,
+    # TransferFcn and PID.
+    expected = {
+        "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
+        "Sum", "Product", "Constant",
+        "ToWorkspace", "Step", "Integrator", "TransferFcn", "PID",
+    }
     assert set(BLOCK_CATALOG.keys()) == expected
 
 

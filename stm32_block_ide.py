@@ -62,7 +62,7 @@ except Exception:
     HAVE_SERIAL = False
 
 
-from code_templates import generate_project, BOARDS, _topo_order as _ct_topo_order
+from code_templates import generate_project, BOARDS, _topo_order as _ct_topo_order, _bilinear_tf
 from workspace_shared import WORKSPACE
 from matlab_workspace import MatlabWorkspace
 
@@ -214,6 +214,105 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
         description=(
             "Multiplies two input signals each model step. Unconnected inputs "
             "contribute 1.0. Output 'y' = u0 * u1."
+        ),
+    ),
+    "Step": BlockSpec(
+        type_name="Step",
+        display_name="Step",
+        color="#e67e22",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "step_time":     ("1.0", "Time (s) at which the step occurs"),
+            "initial_value": ("0.0", "Output before the step"),
+            "final_value":   ("1.0", "Output at and after the step"),
+        },
+        description=(
+            "Outputs initial_value while t < step_time, then final_value. "
+            "On the MCU, time is tracked by counting model steps. "
+            "Equivalent to Simulink's Step source block."
+        ),
+    ),
+    "Integrator": BlockSpec(
+        type_name="Integrator",
+        display_name="Integrator",
+        color="#2980b9",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_value": ("0.0",   "Initial condition at t = 0"),
+            "upper_limit":   ("1e10",  "Upper saturation limit"),
+            "lower_limit":   ("-1e10", "Lower saturation limit"),
+        },
+        description=(
+            "Discrete integrator using forward Euler: y[k] = y[k−1] + u[k−1]·dt. "
+            "Output is clamped to [lower_limit, upper_limit] each step. "
+            "Set initial_value to a non-zero IC if needed."
+        ),
+    ),
+    "TransferFcn": BlockSpec(
+        type_name="TransferFcn",
+        display_name="Transfer Fcn",
+        color="#6c3483",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "numerator":   ("1",   "s-domain numerator coefficients, highest power first "
+                                   "(e.g. '1 2' → s+2)"),
+            "denominator": ("1 1", "s-domain denominator coefficients, highest power first "
+                                   "(e.g. '1 10' → s+10)"),
+        },
+        description=(
+            "Implements a continuous-time transfer function discretized via "
+            "the bilinear (Tustin) transform at the model step rate. "
+            "Enter polynomials as space-separated coefficients, highest power "
+            "first: '1 3 2' means s²+3s+2. "
+            "The system must be proper (numerator degree ≤ denominator degree). "
+            "Internally generates a Direct-Form-II-Transposed IIR filter."
+        ),
+    ),
+    "PID": BlockSpec(
+        type_name="PID",
+        display_name="PID Controller",
+        color="#17a589",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "Kp":          ("1.0",   "Proportional gain"),
+            "Ki":          ("0.0",   "Integral gain"),
+            "Kd":          ("0.0",   "Derivative gain"),
+            "N":           ("100.0", "Derivative filter coefficient (rad/s). "
+                                     "Must be < 2/step_s for stability."),
+            "upper_limit": ("1e10",  "Output upper saturation limit"),
+            "lower_limit": ("-1e10", "Output lower saturation limit"),
+        },
+        description=(
+            "Parallel-form PID with a first-order derivative filter: "
+            "y = Kp·e + Ki·∫e dt + Kd·N·s/(s+N)·e, "
+            "discretized with forward Euler. "
+            "N is the derivative filter bandwidth in rad/s (higher = closer "
+            "to ideal differentiation). Output is clamped to the saturation "
+            "limits. Set Ki=0 or Kd=0 to get PD or PI controllers."
+        ),
+    ),
+    "ToWorkspace": BlockSpec(
+        type_name="ToWorkspace",
+        display_name="To Workspace",
+        color="#16a085",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "variable_name": ("yout",   "Python workspace variable to write (e.g. 'yout')"),
+            "max_points":    ("10000",  "Maximum samples stored (oldest are dropped)"),
+            "decimation":    ("1",      "Store every Nth sample (1 = every sample)"),
+            "save_time":     ("1",      "1 = also write a '<name>_t' time vector"),
+        },
+        description=(
+            "Captures a signal during host simulation and writes it to the "
+            "Python workspace as a NumPy array named by 'variable_name'. "
+            "A matching time vector '<name>_t' is also written when "
+            "'save_time' is 1. Use these arrays in the Python Workspace tab "
+            "for post-processing, FFT, or plotting.\n\n"
+            "On the MCU this block produces no code — it is a simulation-only "
+            "sink, analogous to Simulink's To Workspace block."
         ),
     ),
 }
@@ -993,8 +1092,6 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             else:
                 outs[(b["id"], "y")] = np.asarray(override)[:n]
         elif b["type"] == "Ultrasonic":
-            # No real sensor on the host. Allow override via workspace variable
-            # ``ultrasonic_<id>`` (scalar or array of meters) for what-if tests.
             override = WORKSPACE.globals.get(f"ultrasonic_{b['id']}")
             if override is None:
                 outs[(b["id"], "d")] = np.zeros(n)
@@ -1004,27 +1101,117 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                     outs[(b["id"], "d")] = np.full(n, float(arr))
                 else:
                     outs[(b["id"], "d")] = arr[:n]
+        elif b["type"] == "Step":
+            st  = pval(b["params"].get("step_time",     "1.0"))
+            iv  = pval(b["params"].get("initial_value",  "0.0"))
+            fv  = pval(b["params"].get("final_value",    "1.0"))
+            outs[(b["id"], "y")] = np.where(t >= st, fv, iv)
 
     # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
     for c in model["connections"]:
         wires[(c["dst_block"], c["dst_port"])] = (c["src_block"], c["src_port"])
 
-    # Middle pass: through blocks (Sum, Product) in topological order so that
-    # chains (e.g. Sum → Product) are resolved correctly.
+    # Middle pass: all blocks with inputs, in topological order.
     for b in _ct_topo_order(model):
+        bid = b["id"]
+
+        def _input(port: str, default: float = 0.0) -> np.ndarray:
+            src = wires.get((bid, port))
+            if src is None:
+                return np.full(n, default)
+            return outs.get(src, np.full(n, default))
+
         if b["type"] == "Sum":
-            src0 = wires.get((b["id"], "u0"))
-            src1 = wires.get((b["id"], "u1"))
-            arr0 = outs.get(src0, np.zeros(n)) if src0 else np.zeros(n)
-            arr1 = outs.get(src1, np.zeros(n)) if src1 else np.zeros(n)
-            outs[(b["id"], "y")] = arr0 + arr1
+            outs[(bid, "y")] = _input("u0") + _input("u1")
+
         elif b["type"] == "Product":
-            src0 = wires.get((b["id"], "u0"))
-            src1 = wires.get((b["id"], "u1"))
-            arr0 = outs.get(src0, np.ones(n)) if src0 else np.ones(n)
-            arr1 = outs.get(src1, np.ones(n)) if src1 else np.ones(n)
-            outs[(b["id"], "y")] = arr0 * arr1
+            outs[(bid, "y")] = _input("u0", 1.0) * _input("u1", 1.0)
+
+        elif b["type"] == "Integrator":
+            u_arr = _input("u")
+            ic    = pval(b["params"].get("initial_value",  "0.0"))
+            upper = pval(b["params"].get("upper_limit",    "1e10"))
+            lower = pval(b["params"].get("lower_limit",   "-1e10"))
+            # Forward Euler: y[k] = ic + sum(u[0..k-1]) * dt
+            y = ic + np.concatenate([[0.0], np.cumsum(u_arr[:-1])]) * step_s
+            outs[(bid, "y")] = np.clip(y, lower, upper)
+
+        elif b["type"] == "TransferFcn":
+            u_arr   = _input("u")
+            num_str = b["params"].get("numerator",   "1")
+            den_str = b["params"].get("denominator", "1 1")
+            try:
+                bz, az = _bilinear_tf(num_str, den_str, 1.0 / step_s)
+                # Use scipy if available; fall back to a pure-numpy IIR
+                try:
+                    from scipy.signal import lfilter
+                    y = lfilter(bz, az, u_arr)
+                except ImportError:
+                    y = np.zeros(n)
+                    order = len(az) - 1
+                    s = np.zeros(order)          # Direct Form II Transposed state
+                    for k in range(n):
+                        yk = bz[0] * u_arr[k] + (s[0] if order else 0.0)
+                        for j in range(order - 1):
+                            s[j] = bz[j+1]*u_arr[k] - az[j+1]*yk + s[j+1]
+                        if order:
+                            s[order-1] = bz[order]*u_arr[k] - az[order]*yk
+                        y[k] = yk
+            except Exception:
+                y = np.zeros(n)
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "PID":
+            u_arr  = _input("u")
+            Kp     = pval(b["params"].get("Kp",          "1.0"))
+            Ki     = pval(b["params"].get("Ki",          "0.0"))
+            Kd     = pval(b["params"].get("Kd",          "0.0"))
+            N_filt = pval(b["params"].get("N",          "100.0"))
+            upper  = pval(b["params"].get("upper_limit", "1e10"))
+            lower  = pval(b["params"].get("lower_limit","-1e10"))
+            KdN    = Kd * N_filt
+            N_dt   = min(N_filt * step_s, 1.99)   # clamp for forward-Euler stability
+            y      = np.empty(n)
+            integ  = 0.0
+            d_st   = 0.0
+            for k in range(n):
+                e      = u_arr[k]
+                p_out  = Kp * e
+                integ += Ki * e * step_s
+                d_out  = KdN * (e - d_st)
+                d_st  += N_dt * (e - d_st)
+                raw    = p_out + integ + d_out
+                y[k]   = max(lower, min(upper, raw))
+            outs[(bid, "y")] = y
+
+    # ToWorkspace: capture signal into the Python workspace and expose it to
+    # the Simulate Scope tab so the user can see what was saved.
+    for b in model["blocks"]:
+        if b["type"] == "ToWorkspace":
+            var_name = b["params"].get("variable_name", "yout").strip() or "yout"
+            try:
+                max_pts = max(1, int(float(b["params"].get("max_points", "10000"))))
+            except Exception:
+                max_pts = 10000
+            try:
+                decim = max(1, int(float(b["params"].get("decimation", "1"))))
+            except Exception:
+                decim = 1
+            save_t = int(float(b["params"].get("save_time", "1"))) != 0
+
+            src = wires.get((b["id"], "u"))
+            if src is not None:
+                sig = outs.get(src)
+                if sig is not None:
+                    sig_d   = sig[::decim][-max_pts:]
+                    time_d  = t[::decim][-max_pts:]
+                    WORKSPACE.globals[var_name] = sig_d
+                    if save_t:
+                        WORKSPACE.globals[f"{var_name}_t"] = time_d
+                    # keep the trimmed slice so the display loop below can
+                    # show it in the Simulate Scope tab at the correct time axis
+                    outs[(b["id"], "_saved")] = (time_d, sig_d)
 
     display: Dict[str, np.ndarray] = {}
     for b in model["blocks"]:
@@ -1042,6 +1229,18 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 if sig is not None:
                     thr = pval(b["params"]["threshold"])
                     display[f"{b['id']}.pin"] = (sig > thr).astype(float)
+        elif b["type"] == "ToWorkspace":
+            saved = outs.get((b["id"], "_saved"))
+            if saved is not None:
+                var_name = b["params"].get("variable_name", "yout").strip() or "yout"
+                _tw_t, _tw_sig = saved
+                # Pad/trim to full time axis length for the scope plot
+                # (decimated data: just resample to full grid via interpolation
+                # so the scope x-axis lines up with other channels).
+                if len(_tw_t) == n:
+                    display[f"{var_name} [{b['id']}]"] = _tw_sig
+                else:
+                    display[f"{var_name} [{b['id']}]"] = np.interp(t, _tw_t, _tw_sig)
 
     if not display:
         display = {k[0] + "." + k[1]: v for k, v in outs.items()}
@@ -1349,6 +1548,17 @@ class MainWindow(QMainWindow):
             return
         self.sim_scope_tab.show_simulation(t, sigs)
         self.tabs.setCurrentWidget(self.sim_scope_tab)
+        # Collect the names written by ToWorkspace blocks, refresh the
+        # variable table, and echo the names to the command window so the
+        # user knows what landed in the workspace.
+        tw_vars: List[str] = []
+        for b in model["blocks"]:
+            if b["type"] == "ToWorkspace":
+                vn = b["params"].get("variable_name", "yout").strip() or "yout"
+                tw_vars.append(vn)
+                if int(float(b["params"].get("save_time", "1"))):
+                    tw_vars.append(f"{vn}_t")
+        self.python_tab.refresh_workspace(tw_vars or None)
 
     def export_c(self) -> None:
         target = QFileDialog.getExistingDirectory(self, "Export project to folder")

@@ -108,6 +108,78 @@ def _wires(model: dict) -> Dict[Tuple[str, str], Tuple[str, str]]:
             for c in model["connections"]}
 
 
+def _bilinear_tf(num_s_str: str, den_s_str: str, fs: float):
+    """Convert a continuous-time transfer function to discrete using the
+    bilinear (Tustin) transform.
+
+    Parameters
+    ----------
+    num_s_str, den_s_str : str
+        Space-separated polynomial coefficients in the s-domain, highest
+        power first.  ``"1 2"`` means s + 2;  ``"1 0 4"`` means s² + 4.
+    fs : float
+        Sample frequency in Hz (1 / step_s).
+
+    Returns
+    -------
+    (b_z, a_z) : tuple[ndarray, ndarray]
+        Discrete z-domain coefficients, normalized so a_z[0] == 1.
+        Length is (order + 1) for both arrays.
+
+    Raises
+    ------
+    ValueError
+        If the transfer function is improper or the strings are malformed.
+    """
+    import numpy as np
+
+    def _parse(s: str) -> "np.ndarray":
+        parts = str(s).split()
+        if not parts:
+            raise ValueError(f"Empty polynomial string: '{s}'")
+        return np.array([float(x) for x in parts], dtype=float)
+
+    num = _parse(num_s_str)
+    den = _parse(den_s_str)
+
+    if len(num) > len(den):
+        raise ValueError(
+            f"Improper transfer function: numerator degree ({len(num)-1}) "
+            f"exceeds denominator degree ({len(den)-1}). Must be proper."
+        )
+
+    n = len(den) - 1  # system order (= denominator degree)
+
+    # Pad numerator to length n+1 (prepend zeros for missing higher powers)
+    num = np.concatenate([np.zeros(n + 1 - len(num)), num])
+
+    # Static gain (order 0): just a constant multiplier, no dynamics.
+    if n == 0:
+        return np.array([num[0] / den[0]]), np.array([1.0])
+
+    # Bilinear substitution: s → 2*fs*(z−1)/(z+1)
+    # Multiplying through by (z+1)^n clears denominators:
+    #   coeff[k] * s^(n-k)  →  coeff[k] * (2fs)^(n-k) * (z-1)^(n-k) * (z+1)^k
+    twofs = 2.0 * fs
+    b_z = np.zeros(n + 1)
+    a_z = np.zeros(n + 1)
+
+    for k in range(n + 1):
+        power = n - k          # power of s for index k
+        poly = np.array([1.0])
+        for _ in range(power):                  # (z − 1)^power
+            poly = np.convolve(poly, [1.0, -1.0])
+        for _ in range(k):                      # (z + 1)^k
+            poly = np.convolve(poly, [1.0,  1.0])
+        scale = twofs ** power
+        b_z += num[k] * scale * poly
+        a_z += den[k] * scale * poly
+
+    # Normalize so a_z[0] == 1
+    norm = a_z[0]
+    return b_z / norm, a_z / norm
+
+
 # ---------------------------------------------------------------------------
 # Per-block C emission
 # ---------------------------------------------------------------------------
@@ -130,7 +202,9 @@ def _emit_decls(blocks: List[dict]) -> str:
             decls.append(f"static float {_sig_var(b['id'],'d')} = 0.0f;")
         elif b["type"] in ("Sum", "Product"):
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
-        # GpioOut & Scope: no signal output
+        elif b["type"] in ("Step", "Integrator", "TransferFcn", "PID"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        # GpioOut, Scope, ToWorkspace: no signal output
     return "\n".join(decls)
 
 
@@ -327,6 +401,115 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
             u1 = _sig_var(*wires[(bid, "u1")]) if (bid, "u1") in wires else "1.0f"
             lines.append(f"    /* block {bid}: Product */")
             lines.append(f"    {_sig_var(bid,'y')} = {u0} * {u1};")
+        elif t == "ToWorkspace":
+            var = p.get("variable_name", "yout")
+            lines.append(f"    /* block {bid}: ToWorkspace '{var}' — host simulation only, no MCU code */")
+
+        # ── Step ────────────────────────────────────────────────────────────
+        elif t == "Step":
+            step_time  = num(p.get("step_time",     "1.0"), 1.0)
+            init_val   = num(p.get("initial_value",  "0.0"), 0.0)
+            final_val  = num(p.get("final_value",    "1.0"), 1.0)
+            lines.append(f"    /* block {bid}: Step */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _cnt_{bid} = 0;")
+            lines.append(f"        float _t_{bid} = (float)_cnt_{bid} * {dt_s:.6f}f;")
+            lines.append(f"        {_sig_var(bid,'y')} = (_t_{bid} >= {step_time}) ? {final_val} : {init_val};")
+            lines.append(f"        _cnt_{bid}++;")
+            lines.append( "    }")
+
+        # ── Integrator ──────────────────────────────────────────────────────
+        elif t == "Integrator":
+            u_expr = get_input(bid, "u")
+            try:
+                ic = float(workspace.eval_param(p.get("initial_value", "0.0")))
+            except Exception:
+                ic = 0.0
+            upper = num(p.get("upper_limit",  "1e10"), 1e10)
+            lower = num(p.get("lower_limit", "-1e10"), -1e10)
+            lines.append(f"    /* block {bid}: Integrator (IC={ic:.6g}) */")
+            lines.append( "    {")
+            lines.append(f"        static float _state_{bid} = {ic:.6f}f;")
+            lines.append(f"        _state_{bid} += {u_expr} * {dt_s:.6f}f;")
+            lines.append(f"        if (_state_{bid} > {upper}) _state_{bid} = {upper};")
+            lines.append(f"        if (_state_{bid} < {lower}) _state_{bid} = {lower};")
+            lines.append(f"        {_sig_var(bid,'y')} = _state_{bid};")
+            lines.append( "    }")
+
+        # ── Transfer Function ────────────────────────────────────────────────
+        elif t == "TransferFcn":
+            u_expr  = get_input(bid, "u")
+            num_str = p.get("numerator",   "1")
+            den_str = p.get("denominator", "1 1")
+            try:
+                # Evaluate any workspace expressions inside the strings
+                num_str = str(workspace.eval_param(num_str)) if " " not in num_str else num_str
+                den_str = str(workspace.eval_param(den_str)) if " " not in den_str else den_str
+            except Exception:
+                pass
+            try:
+                bz, az = _bilinear_tf(num_str, den_str, 1.0 / dt_s)
+            except Exception as exc:
+                lines.append(f"    /* block {bid}: TransferFcn — codegen error: {exc} */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;")
+                continue
+            order = len(az) - 1
+            lines.append(f"    /* block {bid}: TransferFcn order={order} */")
+            if order == 0:
+                # Static gain
+                lines.append(f"    {_sig_var(bid,'y')} = {bz[0]:.10f}f * {u_expr};")
+            else:
+                lines.append( "    {")
+                # State declarations
+                state_decl = ", ".join(f"_s{i}_{bid} = 0.0f" for i in range(order))
+                lines.append(f"        static float {state_decl};")
+                lines.append(f"        float _u = {u_expr};")
+                # Direct Form II Transposed
+                lines.append(f"        float _y = {bz[0]:.10f}f * _u"
+                              + (f" + _s0_{bid};" if order >= 1 else ";"))
+                for i in range(order - 1):
+                    rhs = (f"{bz[i+1]:.10f}f * _u - {az[i+1]:.10f}f * _y"
+                           + f" + _s{i+1}_{bid}")
+                    lines.append(f"        _s{i}_{bid} = {rhs};")
+                last = order - 1
+                lines.append(f"        _s{last}_{bid} = {bz[order]:.10f}f * _u"
+                              f" - {az[order]:.10f}f * _y;")
+                lines.append(f"        {_sig_var(bid,'y')} = _y;")
+                lines.append( "    }")
+
+        # ── PID Controller ───────────────────────────────────────────────────
+        elif t == "PID":
+            u_expr = get_input(bid, "u")
+            Kp     = num(p.get("Kp",          "1.0"), 1.0)
+            Ki     = num(p.get("Ki",          "0.0"), 0.0)
+            Kd     = num(p.get("Kd",          "0.0"), 0.0)
+            N_filt = num(p.get("N",          "100.0"), 100.0)
+            upper  = num(p.get("upper_limit", "1e10"), 1e10)
+            lower  = num(p.get("lower_limit","-1e10"), -1e10)
+            # Pre-compute constants baked into the firmware
+            try:
+                _Kd_val = float(workspace.eval_param(p.get("Kd", "0.0")))
+                _N_val  = float(workspace.eval_param(p.get("N", "100.0")))
+                KdN     = f"{_Kd_val * _N_val:.10f}f"
+                N_dt    = f"{min(_N_val * dt_s, 1.99):.10f}f"  # clamp for stability
+            except Exception:
+                KdN  = f"0.0f"
+                N_dt = f"0.0f"
+            lines.append(f"    /* block {bid}: PID Kp={Kp} Ki={Ki} Kd={Kd} N={N_filt} */")
+            lines.append( "    {")
+            lines.append(f"        static float _integ_{bid}  = 0.0f;")
+            lines.append(f"        static float _dstate_{bid} = 0.0f;")
+            lines.append(f"        float _e = {u_expr};")
+            lines.append(f"        float _p = {Kp} * _e;")
+            lines.append(f"        _integ_{bid} += {Ki} * _e * {dt_s:.6f}f;")
+            lines.append(f"        float _d = {KdN} * (_e - _dstate_{bid});")
+            lines.append(f"        _dstate_{bid} += {N_dt} * (_e - _dstate_{bid});")
+            lines.append(f"        float _out = _p + _integ_{bid} + _d;")
+            lines.append(f"        if (_out > {upper}) _out = {upper};")
+            lines.append(f"        if (_out < {lower}) _out = {lower};")
+            lines.append(f"        {_sig_var(bid,'y')} = _out;")
+            lines.append( "    }")
+
         elif t == "Ultrasonic":
             trig = p.get("trig_pin", "PA0")
             echo = p.get("echo_pin", "PA1")

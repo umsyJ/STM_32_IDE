@@ -320,12 +320,245 @@ def _describe(name: str, value) -> tuple:
     return v, cls, "1"
 
 
+class VariableViewerWindow(QWidget):
+    """MATLAB-style variable editor window.
+
+    Opens when the user double-clicks a row in the Workspace table.
+    Renders numpy arrays, lists, tuples, dicts, and scalars in a
+    spreadsheet grid with row/column index headers, auto-sized columns,
+    and a live selection statistics bar (mean · min · max · sum).
+    """
+
+    _MAX_ROWS = 10_000
+    _MAX_COLS = 1_000
+
+    _STYLE = """
+        QWidget          { background:#1e1e1e; color:#d4d4d4; }
+        QTableWidget     { gridline-color:#3c3c3c;
+                           font-family:Consolas,monospace; font-size:12px;
+                           alternate-background-color:#252526; }
+        QHeaderView::section { background:#252526; color:#9cdcfe;
+                               padding:3px 6px;
+                               border:1px solid #3c3c3c; }
+        QTableWidget::item           { padding:0 4px; }
+        QTableWidget::item:selected  { background:#264f78; color:#ffffff; }
+        QScrollBar:vertical          { background:#252526; width:10px; }
+        QScrollBar::handle:vertical  { background:#555; border-radius:4px; }
+        QScrollBar:horizontal        { background:#252526; height:10px; }
+        QScrollBar::handle:horizontal{ background:#555; border-radius:4px; }
+    """
+
+    def __init__(self, name: str, value, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle(f"{name}  —  Variable Editor")
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.resize(720, 520)
+        self.setStyleSheet(self._STYLE)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 4)
+        lay.setSpacing(4)
+
+        # ── info bar ──────────────────────────────────────────────────────
+        self._info = QLabel(self._header_text(name, value))
+        self._info.setStyleSheet("color:#9cdcfe; font-size:11px; padding:2px 4px;")
+        lay.addWidget(self._info)
+
+        # ── main table ────────────────────────────────────────────────────
+        self._tbl = QTableWidget()
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.setSelectionMode(QAbstractItemView.ContiguousSelection)
+        self._tbl.horizontalHeader().setDefaultSectionSize(90)
+        self._tbl.verticalHeader().setDefaultSectionSize(22)
+        self._tbl.verticalHeader().setStyleSheet(
+            "QHeaderView::section { color:#858585; }"
+        )
+        self._tbl.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._tbl.itemSelectionChanged.connect(self._on_selection)
+        lay.addWidget(self._tbl, 1)
+
+        # ── status bar ────────────────────────────────────────────────────
+        self._status = QLabel("")
+        self._status.setStyleSheet(
+            "color:#858585; font-size:10px; padding:2px 6px; "
+            "border-top:1px solid #3c3c3c;"
+        )
+        lay.addWidget(self._status)
+
+        self._populate(value)
+
+    # ── header ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _header_text(name: str, value) -> str:
+        if isinstance(value, np.ndarray):
+            return (f"<b>{name}</b>   "
+                    f"shape&nbsp;<b>{value.shape}</b>   "
+                    f"dtype&nbsp;<b>{value.dtype}</b>   "
+                    f"size&nbsp;<b>{value.size}</b>")
+        if isinstance(value, (list, tuple)):
+            return (f"<b>{name}</b>   "
+                    f"{type(value).__name__}   "
+                    f"length&nbsp;<b>{len(value)}</b>")
+        if isinstance(value, dict):
+            return f"<b>{name}</b>   dict   <b>{len(value)}</b> keys"
+        return f"<b>{name}</b>   {type(value).__name__}"
+
+    # ── populate dispatch ─────────────────────────────────────────────────
+
+    def _populate(self, value) -> None:
+        self._info.setTextFormat(Qt.RichText)
+        if isinstance(value, np.ndarray):
+            self._fill_ndarray(value)
+        elif isinstance(value, (list, tuple)):
+            arr = self._try_to_array(value)
+            if arr is not None:
+                self._fill_ndarray(arr)
+            else:
+                self._fill_sequence(value)
+        elif isinstance(value, dict):
+            self._fill_dict(value)
+        else:
+            self._fill_scalar(value)
+
+    @staticmethod
+    def _try_to_array(seq):
+        """Convert a list/tuple to ndarray if it is uniformly numeric."""
+        try:
+            arr = np.asarray(seq)
+            if arr.ndim in (1, 2) and np.issubdtype(arr.dtype, np.number):
+                return arr
+        except Exception:
+            pass
+        return None
+
+    # ── formatters ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _fmt(v) -> str:
+        try:
+            f = float(v)
+            if f == int(f) and abs(f) < 1e15:
+                return str(int(f))
+            return f"{f:.6g}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _make_item(self, text: str, align=Qt.AlignRight | Qt.AlignVCenter
+                   ) -> QTableWidgetItem:
+        it = QTableWidgetItem(text)
+        it.setTextAlignment(align)
+        return it
+
+    # ── fill strategies ───────────────────────────────────────────────────
+
+    def _fill_ndarray(self, arr: np.ndarray) -> None:
+        if arr.ndim == 0:
+            self._fill_scalar(arr.item())
+            return
+
+        # Normalise to 2-D for display
+        if arr.ndim == 1:
+            data2d = arr.reshape(-1, 1)
+            col_hdrs = ["[0]"]
+        elif arr.ndim == 2:
+            data2d = arr
+            col_hdrs = [f"[{c}]" for c in range(arr.shape[1])]
+        else:
+            # Higher-dimensional: flatten all but last axis
+            data2d = arr.reshape(-1, arr.shape[-1])
+            col_hdrs = [f"[{c}]" for c in range(arr.shape[-1])]
+            self._status.setText(
+                f"Displaying {arr.ndim}-D array reshaped to "
+                f"{data2d.shape[0]}×{data2d.shape[1]}  "
+                f"(original shape {arr.shape})"
+            )
+
+        n_rows = min(data2d.shape[0], self._MAX_ROWS)
+        n_cols = min(data2d.shape[1], self._MAX_COLS)
+
+        self._tbl.setRowCount(n_rows)
+        self._tbl.setColumnCount(n_cols)
+        self._tbl.setHorizontalHeaderLabels(col_hdrs[:n_cols])
+        self._tbl.setVerticalHeaderLabels([str(r) for r in range(n_rows)])
+
+        for r in range(n_rows):
+            for c in range(n_cols):
+                self._tbl.setItem(r, c, self._make_item(self._fmt(data2d[r, c])))
+
+        if data2d.shape[0] > self._MAX_ROWS or data2d.shape[1] > self._MAX_COLS:
+            self._status.setText(
+                f"Showing {n_rows}×{n_cols} of {data2d.shape} — "
+                "truncated for display"
+            )
+
+        self._tbl.resizeColumnsToContents()
+
+    def _fill_sequence(self, seq) -> None:
+        n = min(len(seq), self._MAX_ROWS)
+        self._tbl.setRowCount(n)
+        self._tbl.setColumnCount(2)
+        self._tbl.setHorizontalHeaderLabels(["Index", "Value"])
+        self._tbl.setVerticalHeaderLabels([str(i) for i in range(n)])
+        for i in range(n):
+            self._tbl.setItem(i, 0, self._make_item(str(i)))
+            self._tbl.setItem(i, 1, self._make_item(
+                repr(seq[i]), Qt.AlignLeft | Qt.AlignVCenter))
+        self._tbl.resizeColumnsToContents()
+
+    def _fill_dict(self, d: dict) -> None:
+        items = list(d.items())[:self._MAX_ROWS]
+        self._tbl.setRowCount(len(items))
+        self._tbl.setColumnCount(2)
+        self._tbl.setHorizontalHeaderLabels(["Key", "Value"])
+        self._tbl.verticalHeader().setVisible(False)
+        for i, (k, v) in enumerate(items):
+            self._tbl.setItem(i, 0, self._make_item(
+                str(k), Qt.AlignLeft | Qt.AlignVCenter))
+            self._tbl.setItem(i, 1, self._make_item(
+                repr(v), Qt.AlignLeft | Qt.AlignVCenter))
+        self._tbl.resizeColumnsToContents()
+
+    def _fill_scalar(self, v) -> None:
+        self._tbl.setRowCount(1)
+        self._tbl.setColumnCount(1)
+        self._tbl.setHorizontalHeaderLabels(["Value"])
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setItem(0, 0, self._make_item(
+            repr(v), Qt.AlignLeft | Qt.AlignVCenter))
+        self._tbl.resizeColumnsToContents()
+
+    # ── selection stats ───────────────────────────────────────────────────
+
+    def _on_selection(self) -> None:
+        vals = []
+        for it in self._tbl.selectedItems():
+            try:
+                vals.append(float(it.text()))
+            except ValueError:
+                pass
+        if not vals:
+            self._status.setText("")
+            return
+        a = np.array(vals)
+        self._status.setText(
+            f"  {len(a)} selected    "
+            f"min {a.min():.6g}    "
+            f"max {a.max():.6g}    "
+            f"mean {a.mean():.6g}    "
+            f"sum {a.sum():.6g}"
+        )
+
+
 class VariableTable(QTableWidget):
     """Live view of WORKSPACE.globals."""
 
     def __init__(self, command_window: CommandWindow):
         super().__init__()
         self.command_window = command_window
+        self._open_viewers: Dict[str, VariableViewerWindow] = {}
         self.setColumnCount(4)
         self.setHorizontalHeaderLabels(["Name", "Value", "Class", "Size"])
         self.verticalHeader().setVisible(False)
@@ -334,6 +567,7 @@ class VariableTable(QTableWidget):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(True)
+        self.setToolTip("Double-click a variable to open it in the Variable Editor")
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         self.cellDoubleClicked.connect(self._dbl)
@@ -356,9 +590,24 @@ class VariableTable(QTableWidget):
             self.setItem(row, 3, QTableWidgetItem(size))
 
     def _dbl(self, row: int, _col: int) -> None:
-        name = self.item(row, 0).text()
-        self.command_window.input.setText(name)
-        self.command_window.input.setFocus()
+        name_item = self.item(row, 0)
+        if name_item is None:
+            return
+        name = name_item.text()
+        value = WORKSPACE.globals.get(name)
+        if value is None:
+            return
+        # Reuse an already-open viewer window for this variable rather than
+        # spawning a second one; just bring it to the front.
+        existing = self._open_viewers.get(name)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        viewer = VariableViewerWindow(name, value)
+        viewer.destroyed.connect(lambda _, n=name: self._open_viewers.pop(n, None))
+        self._open_viewers[name] = viewer
+        viewer.show()
 
     def _menu(self, pos) -> None:
         m = QMenu(self)
@@ -484,6 +733,21 @@ class MatlabWorkspace(QWidget):
 
     def _refresh_vars(self) -> None:
         self.var_table.refresh()
+
+    def refresh_workspace(self, notify_vars: list | None = None) -> None:
+        """Refresh the variable table and optionally print a note in the
+        command window listing which variables were just written.
+
+        Called by external code (e.g. simulate_model) that writes directly
+        into WORKSPACE.globals without going through the command window.
+        """
+        self.var_table.refresh()
+        if notify_vars:
+            names = ", ".join(notify_vars)
+            self.command.output.appendPlainText(
+                f"% To Workspace wrote: {names}"
+            )
+            self.command.output.moveCursor(QTextCursor.End)
 
     # --- editor management ------------------------------------------------
 
