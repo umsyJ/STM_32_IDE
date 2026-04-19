@@ -328,12 +328,19 @@ class BlockItem(QGraphicsRectItem):
 class ConnectionItem(QGraphicsPathItem):
     """Bezier wire between two ports."""
 
+    _PEN_NORMAL   = QPen(QColor("#eeeeee"), 2)
+    _PEN_HOVER    = QPen(QColor("#ffd54a"), 3)
+    _PEN_SELECTED = QPen(QColor("#ff4444"), 3)
+
     def __init__(self, src_port: PortItem, dst_port: PortItem):
         super().__init__()
         self.src = src_port
         self.dst = dst_port
-        self.setPen(QPen(QColor("#eeeeee"), 2))
+        self.setPen(self._PEN_NORMAL)
         self.setZValue(-1)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.PointingHandCursor)
         self.update_path()
 
     def update_path(self) -> None:
@@ -347,6 +354,27 @@ class ConnectionItem(QGraphicsPathItem):
             p2,
         )
         self.setPath(path)
+
+    def shape(self):
+        # Widen the hit area so the wire is easy to click.
+        stroker = QPainterPath()
+        from PyQt5.QtGui import QPainterPathStroker
+        ps = QPainterPathStroker()
+        ps.setWidth(12)
+        return ps.createStroke(self.path())
+
+    def hoverEnterEvent(self, ev):
+        if not self.isSelected():
+            self.setPen(self._PEN_HOVER)
+
+    def hoverLeaveEvent(self, ev):
+        if not self.isSelected():
+            self.setPen(self._PEN_NORMAL)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.setPen(self._PEN_SELECTED if value else self._PEN_NORMAL)
+        return super().itemChange(change, value)
 
 
 # ---------------------------------------------------------------------------
@@ -449,11 +477,19 @@ class BlockScene(QGraphicsScene):
             return
         super().mouseReleaseEvent(event)
 
+    def remove_connection_item(self, ci: "ConnectionItem") -> None:
+        idx = self.connection_items.index(ci)
+        self.removeItem(ci)
+        del self.connections[idx]
+        del self.connection_items[idx]
+
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             for it in list(self.selectedItems()):
                 if isinstance(it, BlockItem):
                     self.remove_block(it)
+                elif isinstance(it, ConnectionItem):
+                    self.remove_connection_item(it)
             return
         super().keyPressEvent(event)
 
