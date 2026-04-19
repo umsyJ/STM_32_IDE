@@ -38,7 +38,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAction, QApplication, QComboBox, QDockWidget, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QGraphicsItem, QGraphicsLineItem,
+    QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsLineItem,
     QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
@@ -62,7 +62,7 @@ except Exception:
     HAVE_SERIAL = False
 
 
-from code_templates import generate_project, BOARDS
+from code_templates import generate_project, BOARDS, _topo_order as _ct_topo_order
 from workspace_shared import WORKSPACE
 from matlab_workspace import MatlabWorkspace
 
@@ -179,6 +179,43 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "counter. Output 'd' is distance in meters; 0 on timeout / no echo."
         ),
     ),
+    "Constant": BlockSpec(
+        type_name="Constant",
+        display_name="Constant",
+        color="#c0392b",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "value": ("1.0", "Constant output value (may be a workspace expression)"),
+        },
+        description=(
+            "Outputs a fixed float value every model step. "
+            "Use to set thresholds, scale factors, or any fixed signal."
+        ),
+    ),
+    "Sum": BlockSpec(
+        type_name="Sum",
+        display_name="Sum",
+        color="#e74c3c",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Adds two input signals each model step. Unconnected inputs "
+            "contribute 0.0. Output 'y' = u0 + u1."
+        ),
+    ),
+    "Product": BlockSpec(
+        type_name="Product",
+        display_name="Product",
+        color="#8e44ad",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Multiplies two input signals each model step. Unconnected inputs "
+            "contribute 1.0. Output 'y' = u0 * u1."
+        ),
+    ),
 }
 
 
@@ -229,12 +266,20 @@ class PortItem(QGraphicsRectItem):
         self.direction = direction
         self.index = index
         self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CrossCursor)
+        self.setToolTip(f"{'▶ out' if direction == 'out' else '◀ in'}: {name}")
 
     def hoverEnterEvent(self, ev):
         self.setBrush(QBrush(QColor("#ffd54a")))
+        self.setRect(-PORT_RADIUS * 1.5, -PORT_RADIUS * 1.5,
+                     PORT_RADIUS * 3, PORT_RADIUS * 3)
 
     def hoverLeaveEvent(self, ev):
         self.setBrush(QBrush(QColor("#222")))
+        self.setRect(-PORT_RADIUS, -PORT_RADIUS, PORT_RADIUS * 2, PORT_RADIUS * 2)
+
+    def highlight_as_target(self, on: bool) -> None:
+        self.setBrush(QBrush(QColor("#00e676") if on else QColor("#222")))
 
     def scenePos(self) -> QPointF:  # override for clarity
         return self.mapToScene(self.rect().center())
@@ -304,12 +349,19 @@ class BlockItem(QGraphicsRectItem):
 class ConnectionItem(QGraphicsPathItem):
     """Bezier wire between two ports."""
 
+    _PEN_NORMAL   = QPen(QColor("#eeeeee"), 2)
+    _PEN_HOVER    = QPen(QColor("#ffd54a"), 3)
+    _PEN_SELECTED = QPen(QColor("#ff4444"), 3)
+
     def __init__(self, src_port: PortItem, dst_port: PortItem):
         super().__init__()
         self.src = src_port
         self.dst = dst_port
-        self.setPen(QPen(QColor("#eeeeee"), 2))
+        self.setPen(self._PEN_NORMAL)
         self.setZValue(-1)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.PointingHandCursor)
         self.update_path()
 
     def update_path(self) -> None:
@@ -323,6 +375,27 @@ class ConnectionItem(QGraphicsPathItem):
             p2,
         )
         self.setPath(path)
+
+    def shape(self):
+        # Widen the hit area so the wire is easy to click.
+        stroker = QPainterPath()
+        from PyQt5.QtGui import QPainterPathStroker
+        ps = QPainterPathStroker()
+        ps.setWidth(12)
+        return ps.createStroke(self.path())
+
+    def hoverEnterEvent(self, ev):
+        if not self.isSelected():
+            self.setPen(self._PEN_HOVER)
+
+    def hoverLeaveEvent(self, ev):
+        if not self.isSelected():
+            self.setPen(self._PEN_NORMAL)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.setPen(self._PEN_SELECTED if value else self._PEN_NORMAL)
+        return super().itemChange(change, value)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +414,8 @@ class BlockScene(QGraphicsScene):
         self.connections: List[Connection] = []
         self.connection_items: List[ConnectionItem] = []
         self._pending_src: Optional[PortItem] = None
+        self._drag_wire: Optional[QGraphicsPathItem] = None
+        self._highlighted_port: Optional[PortItem] = None
         self._id_counter = 1
 
     # --- block management -------------------------------------------------
@@ -403,33 +478,98 @@ class BlockScene(QGraphicsScene):
 
     # --- mouse handling (wiring + selection) ------------------------------
 
+    def _is_valid_target(self, src: PortItem, dst: PortItem) -> bool:
+        return dst.block is not src.block and dst.direction != src.direction
+
+    def _set_highlighted_port(self, port: Optional[PortItem]) -> None:
+        if self._highlighted_port is port:
+            return
+        if self._highlighted_port is not None:
+            self._highlighted_port.highlight_as_target(False)
+        self._highlighted_port = port
+        if port is not None:
+            port.highlight_as_target(True)
+
+    def _update_drag_wire(self, cursor: QPointF) -> None:
+        if self._drag_wire is None or self._pending_src is None:
+            return
+        p1 = self._pending_src.scenePos()
+        p2 = cursor
+        dx = max(40.0, abs(p2.x() - p1.x()) * 0.5)
+        path = QPainterPath(p1)
+        path.cubicTo(
+            QPointF(p1.x() + dx, p1.y()),
+            QPointF(p2.x() - dx, p2.y()),
+            p2,
+        )
+        self._drag_wire.setPath(path)
+
+    def _cancel_drag(self) -> None:
+        if self._drag_wire is not None:
+            self.removeItem(self._drag_wire)
+            self._drag_wire = None
+        self._set_highlighted_port(None)
+        self._pending_src = None
+
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
         if isinstance(item, PortItem) and event.button() == Qt.LeftButton:
             self._pending_src = item
+            wire = QGraphicsPathItem()
+            wire.setPen(QPen(QColor("#ffd54a"), 2, Qt.DashLine))
+            wire.setZValue(10)
+            self.addItem(wire)
+            self._drag_wire = wire
+            self._update_drag_wire(event.scenePos())
             return
         super().mousePressEvent(event)
-        # Notify panel of selected block, if any
         sel = self.selectedItems()
         if sel and isinstance(sel[0], BlockItem):
             self.block_selected.emit(sel[0])
         else:
             self.block_selected.emit(None)
 
+    def _port_at(self, scene_pos: QPointF) -> Optional[PortItem]:
+        """Return the topmost PortItem at scene_pos, ignoring the drag wire."""
+        for item in self.items(scene_pos):
+            if isinstance(item, PortItem):
+                return item
+        return None
+
+    def mouseMoveEvent(self, event):
+        if self._pending_src is not None:
+            self._update_drag_wire(event.scenePos())
+            port = self._port_at(event.scenePos())
+            if port is not None and self._is_valid_target(self._pending_src, port):
+                self._set_highlighted_port(port)
+            else:
+                self._set_highlighted_port(None)
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
         if self._pending_src is not None:
-            item = self.itemAt(event.scenePos(), self.views()[0].transform())
-            if isinstance(item, PortItem) and item is not self._pending_src:
-                self.add_connection(self._pending_src, item)
-            self._pending_src = None
+            port = self._port_at(event.scenePos())
+            src = self._pending_src
+            self._cancel_drag()
+            if port is not None and port is not src:
+                self.add_connection(src, port)
             return
         super().mouseReleaseEvent(event)
+
+    def remove_connection_item(self, ci: "ConnectionItem") -> None:
+        idx = self.connection_items.index(ci)
+        self.removeItem(ci)
+        del self.connections[idx]
+        del self.connection_items[idx]
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             for it in list(self.selectedItems()):
                 if isinstance(it, BlockItem):
                     self.remove_block(it)
+                elif isinstance(it, ConnectionItem):
+                    self.remove_connection_item(it)
             return
         super().keyPressEvent(event)
 
@@ -592,11 +732,24 @@ class SerialReader(QThread):
         self._stop.set()
 
 
-class ScopeTab(QWidget):
+def _make_plot_widget():
+    if not HAVE_PYQTGRAPH:
+        return None
+    pw = pg.PlotWidget()
+    pw.setBackground("#1e1e1e")
+    pw.showGrid(x=True, y=True, alpha=0.3)
+    pw.addLegend()
+    pw.setClipToView(True)
+    pw.setDownsampling(auto=True, mode="peak")
+    return pw
+
+
+class LiveScopeTab(QWidget):
+    """Scope tab for live serial data from the MCU."""
 
     def __init__(self):
         super().__init__()
-        self.layout_ = QVBoxLayout(self)
+        lay = QVBoxLayout(self)
 
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Port:"))
@@ -609,82 +762,49 @@ class ScopeTab(QWidget):
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self.toggle_connect)
         bar.addWidget(self.connect_btn)
-        self.sim_btn = QPushButton("Simulate Model")
-        self.sim_btn.setToolTip(
-            "Run the block model numerically in Python (no hardware) "
-            "and display the resulting waveforms in the scope."
-        )
-        bar.addWidget(self.sim_btn)
-
-        bar.addSpacing(12)
+        bar.addSpacing(8)
         bar.addWidget(QLabel("Window (s):"))
         self.window_spin = QDoubleSpinBox()
         self.window_spin.setDecimals(1)
         self.window_spin.setRange(0.5, 600.0)
         self.window_spin.setSingleStep(0.5)
         self.window_spin.setValue(5.0)
-        self.window_spin.setToolTip(
-            "Length of the rolling time window shown on the scope, in seconds. "
-            "Samples older than this are dropped from the view."
-        )
+        self.window_spin.setToolTip("Rolling time window displayed, in seconds.")
         self.window_spin.valueChanged.connect(self._on_window_changed)
         bar.addWidget(self.window_spin)
-
         self.auto_y_check = QCheckBox("Auto-Y")
         self.auto_y_check.setChecked(True)
-        self.auto_y_check.setToolTip(
-            "Rescale the Y axis on every update so the visible samples "
-            "fill the plot. Uncheck to freeze the Y range at its last value."
-        )
         self.auto_y_check.toggled.connect(lambda _: self._repaint())
         bar.addWidget(self.auto_y_check)
-
         bar.addStretch(1)
-        self.layout_.addLayout(bar)
+        lay.addLayout(bar)
 
-        if HAVE_PYQTGRAPH:
-            self.plot = pg.PlotWidget()
-            self.plot.setBackground("#1e1e1e")
-            self.plot.showGrid(x=True, y=True, alpha=0.3)
-            self.plot.addLegend()
-            # Render only data inside the visible X range, and auto-downsample
-            # when there are more points than pixels. Keeps repaint cheap even
-            # with a multi-second window at 1 kHz sample rate.
-            self.plot.setClipToView(True)
-            self.plot.setDownsampling(auto=True, mode="peak")
-            self.layout_.addWidget(self.plot, 1)
-            self._curves: List[pg.PlotDataItem] = []
+        self.plot = _make_plot_widget()
+        if self.plot:
+            lay.addWidget(self.plot, 1)
+            self._curves: List = []
         else:
-            self.plot = None
-            self.layout_.addWidget(QLabel(
-                "pyqtgraph is not installed — install it to see waveform plots."
-            ))
+            lay.addWidget(QLabel("pyqtgraph is not installed."))
 
         self.status_lbl = QLabel("idle")
-        self.layout_.addWidget(self.status_lbl)
+        lay.addWidget(self.status_lbl)
 
         self._reader: Optional[SerialReader] = None
         self._data: Dict[int, List[Tuple[float, float]]] = {}
-        self._max_pts = 200_000  # hard cap per channel; time window is the primary trim
-        self._dirty = False      # set when new samples arrived; repaint clears it
+        self._max_pts = 200_000
+        self._dirty = False
+        self._t0: Optional[float] = None  # timestamp of first sample after connect
 
-        # Decouple sample-in rate from repaint rate. The MCU streams at up to
-        # 1 kHz; the GUI only needs ~30 fps to look smooth and per-sample
-        # repaints starve the Qt event loop (the terminal PuTTY doesn't redraw
-        # a plot, which is why it used to appear faster than the scope).
         self._repaint_timer = QTimer(self)
-        self._repaint_timer.setInterval(33)  # ~30 Hz
+        self._repaint_timer.setInterval(33)
         self._repaint_timer.timeout.connect(self._tick_repaint)
         self._repaint_timer.start()
 
     def _on_window_changed(self, _val: float) -> None:
-        # Trim existing data to the new window and redraw immediately so the
-        # user sees the effect without waiting for the next sample.
         if not self._data:
             return
         t_latest = max((d[-1][0] for d in self._data.values() if d), default=0.0)
-        win = self.window_spin.value()
-        t_min = t_latest - win
+        t_min = t_latest - self.window_spin.value()
         for i in list(self._data.keys()):
             self._data[i] = [p for p in self._data[i] if p[0] >= t_min]
         self._repaint()
@@ -699,6 +819,13 @@ class ScopeTab(QWidget):
 
     def toggle_connect(self) -> None:
         if self._reader is None:
+            # Reconnecting — clear old data so the plot restarts from 0 s.
+            self._data.clear()
+            self._dirty = False
+            self._t0 = None
+            if self.plot:
+                self.plot.clear()
+            self._curves = []
             port = self.port_box.currentText()
             if port == "(none)":
                 return
@@ -707,18 +834,21 @@ class ScopeTab(QWidget):
             self._reader.status.connect(self.status_lbl.setText)
             self._reader.start()
             self.connect_btn.setText("Disconnect")
+            self.status_lbl.setText(f"connected — {port}")
         else:
             self._reader.stop()
             self._reader.wait(1000)
             self._reader = None
             self.connect_btn.setText("Connect")
+            self.status_lbl.setText("paused")
 
     def _on_sample(self, t: float, channels: List[float]) -> None:
-        # Hot path: called on every serial line (up to 1 kHz). Do the minimum
-        # work — just append. Trimming and redraw happen in the 30 Hz timer.
+        if self._t0 is None:
+            self._t0 = t
+        t_rel = t - self._t0
         for i, v in enumerate(channels):
             buf = self._data.setdefault(i, [])
-            buf.append((t, v))
+            buf.append((t_rel, v))
             if len(buf) > self._max_pts:
                 del buf[: len(buf) - self._max_pts]
         self._dirty = True
@@ -727,69 +857,96 @@ class ScopeTab(QWidget):
         if not self._dirty:
             return
         self._dirty = False
-        # Trim everything outside the rolling time window before drawing.
         if self._data:
             t_latest = max((d[-1][0] for d in self._data.values() if d), default=0.0)
             t_min = t_latest - self.window_spin.value()
             for i, buf in self._data.items():
                 if buf and buf[0][0] < t_min:
-                    # Linear trim is fine at 30 Hz.
-                    cut = 0
-                    for j, (tj, _) in enumerate(buf):
-                        if tj >= t_min:
-                            cut = j
-                            break
-                    else:
-                        cut = len(buf)
+                    cut = next((j for j, (tj, _) in enumerate(buf) if tj >= t_min),
+                               len(buf))
                     if cut > 0:
                         del buf[:cut]
         self._repaint()
 
     def _repaint(self) -> None:
-        if not HAVE_PYQTGRAPH:
+        if not self.plot:
             return
-        # (Re)create one curve per channel
         while len(self._curves) < len(self._data):
             color = pg.intColor(len(self._curves), hues=8)
-            c = self.plot.plot(pen=pg.mkPen(color, width=2),
-                               name=f"ch{len(self._curves)}")
-            self._curves.append(c)
+            self._curves.append(self.plot.plot(pen=pg.mkPen(color, width=2),
+                                               name=f"ch{len(self._curves)}"))
         t_latest = 0.0
-        y_min = float("inf")
-        y_max = float("-inf")
+        y_min, y_max = float("inf"), float("-inf")
         for i, data in self._data.items():
             xs = [p[0] for p in data]
             ys = [p[1] for p in data]
             self._curves[i].setData(xs, ys)
-            if xs and xs[-1] > t_latest:
-                t_latest = xs[-1]
+            if xs:
+                t_latest = max(t_latest, xs[-1])
             if ys:
                 y_min = min(y_min, min(ys))
                 y_max = max(y_max, max(ys))
-        # Pin the visible X range to the rolling window so the plot scrolls.
         if t_latest > 0.0:
             win = self.window_spin.value()
             self.plot.setXRange(max(0.0, t_latest - win), t_latest, padding=0)
-        # Auto-scale Y to the samples currently in view, with a small margin so
-        # peaks don't hug the plot edge. If the trace is flat (y_min == y_max),
-        # give it an arbitrary +/- 1 so you can still see the line.
         if self.auto_y_check.isChecked() and y_max >= y_min:
             if y_max == y_min:
                 pad = 1.0 if y_max == 0.0 else abs(y_max) * 0.1 + 1e-6
                 self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
             else:
                 span = y_max - y_min
-                margin = span * 0.08
-                self.plot.setYRange(y_min - margin, y_max + margin, padding=0)
+                self.plot.setYRange(y_min - span * 0.08, y_max + span * 0.08, padding=0)
+
+
+class SimScopeTab(QWidget):
+    """Scope tab for host-side simulation results."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        self.sim_btn = QPushButton("Simulate Model")
+        self.sim_btn.setToolTip("Run the block model in Python and plot the result.")
+        bar.addWidget(self.sim_btn)
+        bar.addWidget(QLabel("Duration (s):"))
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setDecimals(1)
+        self.duration_spin.setRange(0.5, 600.0)
+        self.duration_spin.setSingleStep(1.0)
+        self.duration_spin.setValue(10.0)
+        self.duration_spin.setToolTip("How many seconds to simulate.")
+        bar.addWidget(self.duration_spin)
+        self.auto_y_check = QCheckBox("Auto-Y")
+        self.auto_y_check.setChecked(True)
+        bar.addWidget(self.auto_y_check)
+        bar.addStretch(1)
+        lay.addLayout(bar)
+
+        self.plot = _make_plot_widget()
+        if self.plot:
+            lay.addWidget(self.plot, 1)
+            self._curves: List = []
+        else:
+            lay.addWidget(QLabel("pyqtgraph is not installed."))
 
     def show_simulation(self, times: np.ndarray, signals: Dict[str, np.ndarray]) -> None:
-        if not HAVE_PYQTGRAPH:
+        if not self.plot:
             return
         self.plot.clear()
         self._curves = []
-        for name, ys in signals.items():
-            c = self.plot.plot(times, ys, pen=pg.mkPen(width=2), name=name)
-            self._curves.append(c)
+        colors = [pg.mkPen(pg.intColor(i, hues=8), width=2) for i in range(len(signals))]
+        for (name, ys), pen in zip(signals.items(), colors):
+            self._curves.append(self.plot.plot(times, ys, pen=pen, name=name))
+        if self.auto_y_check.isChecked() and self._curves:
+            all_y = np.concatenate(list(signals.values()))
+            y_min, y_max = float(all_y.min()), float(all_y.max())
+            if y_min == y_max:
+                pad = 1.0 if y_max == 0.0 else abs(y_max) * 0.1 + 1e-6
+                self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
+            else:
+                span = y_max - y_min
+                self.plot.setYRange(y_min - span * 0.08, y_max + span * 0.08, padding=0)
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +983,9 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             phase = (t * f) % 1.0
             y = np.where(phase < duty, A, off)
             outs[(b["id"], "y")] = y
+        elif b["type"] == "Constant":
+            val = pval(b["params"]["value"])
+            outs[(b["id"], "y")] = np.full(n, val)
         elif b["type"] == "GpioIn":
             override = WORKSPACE.globals.get(f"gpioin_{b['id']}")
             if override is None:
@@ -845,10 +1005,26 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 else:
                     outs[(b["id"], "d")] = arr[:n]
 
-    # Second pass: propagate through wires to GpioOut / Scope inputs
+    # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
     for c in model["connections"]:
         wires[(c["dst_block"], c["dst_port"])] = (c["src_block"], c["src_port"])
+
+    # Middle pass: through blocks (Sum, Product) in topological order so that
+    # chains (e.g. Sum → Product) are resolved correctly.
+    for b in _ct_topo_order(model):
+        if b["type"] == "Sum":
+            src0 = wires.get((b["id"], "u0"))
+            src1 = wires.get((b["id"], "u1"))
+            arr0 = outs.get(src0, np.zeros(n)) if src0 else np.zeros(n)
+            arr1 = outs.get(src1, np.zeros(n)) if src1 else np.zeros(n)
+            outs[(b["id"], "y")] = arr0 + arr1
+        elif b["type"] == "Product":
+            src0 = wires.get((b["id"], "u0"))
+            src1 = wires.get((b["id"], "u1"))
+            arr0 = outs.get(src0, np.ones(n)) if src0 else np.ones(n)
+            arr1 = outs.get(src1, np.ones(n)) if src1 else np.ones(n)
+            outs[(b["id"], "y")] = arr0 * arr1
 
     display: Dict[str, np.ndarray] = {}
     for b in model["blocks"]:
@@ -997,9 +1173,19 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(editor_widget, "Block Diagram")
         self.python_tab = MatlabWorkspace(root_dir=Path.cwd())
         self.tabs.addTab(self.python_tab, "Python Workspace")
-        self.scope_tab = ScopeTab()
-        self.scope_tab.sim_btn.clicked.connect(self.on_simulate)
-        self.tabs.addTab(self.scope_tab, "Scope / Serial")
+        self.live_scope_tab = LiveScopeTab()
+        self.tabs.addTab(self.live_scope_tab, "Live Scope")
+        self.sim_scope_tab = SimScopeTab()
+        self.sim_scope_tab.sim_btn.clicked.connect(self.on_simulate)
+        self.tabs.addTab(self.sim_scope_tab, "Simulate Scope")
+
+        # Debounce timer: re-simulate 800 ms after the last diagram change
+        # when the Simulate Scope tab is visible.
+        self._sim_debounce = QTimer(self)
+        self._sim_debounce.setSingleShot(True)
+        self._sim_debounce.setInterval(800)
+        self._sim_debounce.timeout.connect(self._auto_simulate)
+        self.scene.changed.connect(self._on_scene_changed)
         self.build_log = QPlainTextEdit(readOnly=True)
         self.build_log.setStyleSheet(
             "background: #0d0d0d; color: #b8e0b8; font-family: Consolas, monospace;"
@@ -1143,15 +1329,26 @@ class MainWindow(QMainWindow):
 
     # --- simulate / export / build ---------------------------------------
 
+    def _on_scene_changed(self, _=None) -> None:
+        if self.tabs.currentWidget() is self.sim_scope_tab:
+            self._sim_debounce.start()
+
+    def _auto_simulate(self) -> None:
+        self.on_simulate()
+
     def on_simulate(self) -> None:
         model = self.scene.to_model()
+        model["board"] = self.board
+        model["step_ms"] = self.step_ms
+        duration = self.sim_scope_tab.duration_spin.value()
         try:
-            t, sigs = simulate_model(model, duration_s=2.0, step_s=self.step_ms/1000.0)
+            t, sigs = simulate_model(model, duration_s=duration,
+                                     step_s=self.step_ms / 1000.0)
         except Exception as e:
             QMessageBox.critical(self, "Simulation error", str(e))
             return
-        self.scope_tab.show_simulation(t, sigs)
-        self.tabs.setCurrentWidget(self.scope_tab)
+        self.sim_scope_tab.show_simulation(t, sigs)
+        self.tabs.setCurrentWidget(self.sim_scope_tab)
 
     def export_c(self) -> None:
         target = QFileDialog.getExistingDirectory(self, "Export project to folder")

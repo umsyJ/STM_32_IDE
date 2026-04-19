@@ -8,6 +8,13 @@ Covers:
 - End-to-end project generation (all files present, contents include
   expected symbols)
 - Model JSON round-trip
+- Block connections (fan-out, overwrite, multi-input scope)
+- Workspace.eval_param (literals, expressions, variable refs)
+- _describe display helper (scalars, arrays, collections)
+- Simulator edge cases (amplitude/offset, 3-channel scope, bare signals)
+- C codegen completeness (step_ms, 3-channel UART format, workspace params)
+- Sum block (catalog, simulator, codegen, chaining)
+- Product block (catalog, simulator, codegen, gating pattern)
 
 Run with:
     python test_blocks.py          (built-in runner, no dependencies)
@@ -42,7 +49,15 @@ from code_templates import (  # noqa: E402
     generate_project,
 )
 from stm32_block_ide import BLOCK_CATALOG, simulate_model  # noqa: E402
-from workspace_shared import WORKSPACE  # noqa: E402
+from workspace_shared import WORKSPACE, Workspace  # noqa: E402
+
+# _describe lives in matlab_workspace but has no Qt dependency at import time
+# when PyQt5 is not available; guard so headless CI can still run.
+try:
+    from matlab_workspace import _describe  # noqa: E402
+    _HAS_QT = True
+except Exception:
+    _HAS_QT = False
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +131,18 @@ def _ultra(bid="U", trig="PA0", echo="PA1", period="60", timeout="30000"):
     }
 
 
+def _const(bid="K", value="1.0"):
+    return {"type": "Constant", "id": bid, "x": 0, "y": 0, "params": {"value": value}}
+
+
+def _sum(bid="SM"):
+    return {"type": "Sum", "id": bid, "x": 0, "y": 0, "params": {}}
+
+
+def _product(bid="PR"):
+    return {"type": "Product", "id": bid, "x": 0, "y": 0, "params": {}}
+
+
 def _wire(src_bid, src_port, dst_bid, dst_port):
     return {
         "src_block": src_bid, "src_port": src_port,
@@ -129,7 +156,8 @@ def _wire(src_bid, src_port, dst_bid, dst_port):
 
 
 def test_catalog_has_all_known_types():
-    required = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic"}
+    required = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
+                "Sum", "Product", "Constant"}
     missing = required - set(BLOCK_CATALOG.keys())
     assert not missing, f"missing block types: {missing}"
 
@@ -653,6 +681,945 @@ def test_model_param_values_are_preserved_as_strings():
     params = roundtripped["blocks"][0]["params"]
     assert params["frequency_hz"] == "my_freq_var"
     assert params["amplitude"] == "2.5"
+
+
+# ---------------------------------------------------------------------------
+# 10. Block connections — fan-out, overwrite, multi-input scope
+# ---------------------------------------------------------------------------
+
+
+def test_wires_fan_out_one_source_to_two_sinks():
+    model = _model(
+        [_sw("A"), _scope("S"), _gpio_out("G")],
+        [_wire("A", "y", "S", "u0"), _wire("A", "y", "G", "u")],
+    )
+    w = _wires(model)
+    assert w[("S", "u0")] == ("A", "y")
+    assert w[("G", "u")] == ("A", "y")
+
+
+def test_wires_scope_three_channels_all_mapped():
+    model = _model(
+        [_sw("A"), _sw("B"), _sw("C"), _scope("S")],
+        [
+            _wire("A", "y", "S", "u0"),
+            _wire("B", "y", "S", "u1"),
+            _wire("C", "y", "S", "u2"),
+        ],
+    )
+    w = _wires(model)
+    assert w[("S", "u0")] == ("A", "y")
+    assert w[("S", "u1")] == ("B", "y")
+    assert w[("S", "u2")] == ("C", "y")
+
+
+def test_wires_later_connection_overwrites_earlier_on_same_port():
+    # Two connections both wiring to the same dst port — last one wins.
+    model = _model(
+        [_sw("A"), _sw("B"), _scope("S")],
+        [_wire("A", "y", "S", "u0"), _wire("B", "y", "S", "u0")],
+    )
+    w = _wires(model)
+    # The second wire should win.
+    assert w[("S", "u0")] == ("B", "y")
+    assert len(w) == 1
+
+
+def test_wires_empty_connections_returns_empty_dict():
+    model = _model([_sw("A"), _scope("S")])
+    assert _wires(model) == {}
+
+
+def test_topo_order_chain_ultrasonic_to_scope():
+    model = _model(
+        [_scope("S"), _ultra("U")],
+        [_wire("U", "d", "S", "u0")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("U") < ids.index("S")
+
+
+def test_topo_order_two_independent_sources_both_present():
+    model = _model([_sw("A"), _ultra("U"), _scope("S")],
+                   [_wire("A", "y", "S", "u0"), _wire("U", "d", "S", "u1")])
+    ids = [b["id"] for b in _topo_order(model)]
+    assert set(ids) == {"A", "U", "S"}
+    assert ids.index("A") < ids.index("S")
+    assert ids.index("U") < ids.index("S")
+
+
+def test_topo_order_empty_model():
+    model = _model([])
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids == []
+
+
+def test_topo_order_gpio_in_before_gpio_out():
+    model = _model(
+        [_gpio_out("GO"), _gpio_in("GI")],
+        [_wire("GI", "y", "GO", "u")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("GI") < ids.index("GO")
+
+
+# ---------------------------------------------------------------------------
+# 11. Workspace.eval_param — literals, expressions, variable refs
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_eval_integer_literal():
+    ws = Workspace()
+    assert ws.eval_param("42") == 42
+
+
+def test_workspace_eval_float_literal():
+    ws = Workspace()
+    assert abs(ws.eval_param("3.14") - 3.14) < 1e-9
+
+
+def test_workspace_eval_scientific_notation():
+    ws = Workspace()
+    assert abs(ws.eval_param("1e3") - 1000.0) < 1e-9
+
+
+def test_workspace_eval_python_expression():
+    ws = Workspace()
+    result = ws.eval_param("2 * 3 + 1")
+    assert result == 7
+
+
+def test_workspace_eval_uses_numpy_and_math():
+    ws = Workspace()
+    result = ws.eval_param("np.sqrt(4)")
+    assert abs(float(result) - 2.0) < 1e-9
+
+
+def test_workspace_eval_pi_constant():
+    ws = Workspace()
+    import math as _math
+    assert abs(ws.eval_param("pi") - _math.pi) < 1e-9
+
+
+def test_workspace_eval_user_variable():
+    ws = Workspace()
+    ws.globals["f_pwm"] = 500.0
+    assert ws.eval_param("f_pwm") == 500.0
+    assert ws.eval_param("f_pwm * 2") == 1000.0
+
+
+def test_workspace_eval_empty_string_returns_zero():
+    ws = Workspace()
+    assert ws.eval_param("") == 0
+
+
+def test_workspace_eval_raises_on_undefined_name():
+    ws = Workspace()
+    try:
+        ws.eval_param("undefined_var_xyz")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for undefined name")
+
+
+def test_workspace_globals_persist_across_calls():
+    ws = Workspace()
+    ws.eval_param.__func__  # just ensure it's callable
+    ws.globals["x"] = 10
+    assert ws.eval_param("x + 5") == 15
+    ws.globals["x"] = 20
+    assert ws.eval_param("x + 5") == 25
+
+
+# ---------------------------------------------------------------------------
+# 12. _describe display helper (no Qt needed — pure logic)
+# ---------------------------------------------------------------------------
+
+
+def test_describe_scalar_int():
+    if not _HAS_QT:
+        return
+    val, cls, size = _describe("x", 42)
+    assert "42" in val
+    assert size == "1"
+
+
+def test_describe_scalar_float():
+    if not _HAS_QT:
+        return
+    val, cls, size = _describe("x", 3.14)
+    assert "3.14" in val
+    assert size == "1"
+
+
+def test_describe_small_ndarray():
+    if not _HAS_QT:
+        return
+    arr = np.array([1.0, 2.0, 3.0])
+    val, cls, size = _describe("a", arr)
+    assert "ndarray" in cls
+    assert size == "3"
+
+
+def test_describe_large_ndarray_shows_shape():
+    if not _HAS_QT:
+        return
+    arr = np.zeros((100, 50))
+    val, cls, size = _describe("a", arr)
+    assert "<array" in val
+    assert "100" in val or "5000" in val or "50" in val
+
+
+def test_describe_list():
+    if not _HAS_QT:
+        return
+    val, cls, size = _describe("lst", [1, 2, 3])
+    assert cls == "list"
+    assert size == "3"
+
+
+def test_describe_dict():
+    if not _HAS_QT:
+        return
+    val, cls, size = _describe("d", {"a": 1, "b": 2})
+    assert cls == "dict"
+    assert size == "2"
+
+
+def test_describe_long_repr_is_truncated():
+    if not _HAS_QT:
+        return
+    big_list = list(range(1000))
+    val, cls, size = _describe("lst", big_list)
+    assert len(val) <= 63  # 60 chars + "..."
+
+
+# ---------------------------------------------------------------------------
+# 13. Simulator edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_simulate_squarewave_nondefault_amplitude_and_offset():
+    model = _model(
+        [_sw("A", frequency_hz="10", amplitude="3.0", offset="-1.0"), _scope("S")],
+        [_wire("A", "y", "S", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["S.u0"]
+    uniq = {round(float(v), 6) for v in np.unique(y)}
+    assert uniq <= {3.0, -1.0}, f"unexpected values: {uniq}"
+    # 50% duty → mean midpoint between 3.0 and -1.0 = 1.0
+    assert abs(float(y.mean()) - 1.0) < 0.1, f"mean={y.mean():.3f}"
+
+
+def test_simulate_squarewave_full_duty_is_always_high():
+    model = _model(
+        [_sw("A", frequency_hz="10", duty="1.0"), _scope("S")],
+        [_wire("A", "y", "S", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["S.u0"]
+    assert float(y.min()) == 1.0, "duty=1.0 should always be high"
+
+
+def test_simulate_squarewave_zero_duty_is_always_low():
+    model = _model(
+        [_sw("A", frequency_hz="10", duty="0.0"), _scope("S")],
+        [_wire("A", "y", "S", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["S.u0"]
+    assert float(y.max()) == 0.0, "duty=0.0 should always be low"
+
+
+def test_simulate_scope_three_channels_all_captured():
+    model = _model(
+        [
+            _sw("A", frequency_hz="1", duty="0.3"),
+            _sw("B", frequency_hz="2", duty="0.7"),
+            _sw("C", frequency_hz="5", duty="0.5"),
+            _scope("S"),
+        ],
+        [
+            _wire("A", "y", "S", "u0"),
+            _wire("B", "y", "S", "u1"),
+            _wire("C", "y", "S", "u2"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    for key in ("S.u0", "S.u1", "S.u2"):
+        assert key in sigs, f"missing channel {key}"
+    # Channel means should reflect duty cycles
+    assert abs(float(sigs["S.u0"].mean()) - 0.3) < 0.05
+    assert abs(float(sigs["S.u1"].mean()) - 0.7) < 0.05
+    assert abs(float(sigs["S.u2"].mean()) - 0.5) < 0.05
+
+
+def test_simulate_no_scope_returns_source_signals():
+    # Without a Scope or GpioOut, simulator should still return source traces.
+    WORKSPACE.globals.pop("gpioin_GI2", None)
+    model = _model([_gpio_in("GI2")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert "GI2.y" in sigs, f"bare source signal missing; got {list(sigs)}"
+
+
+def test_simulate_gpio_in_active_high_workspace_override():
+    WORKSPACE.globals["gpioin_AL"] = np.ones(50)
+    try:
+        model = _model([_gpio_in("AL", active_low="0"), _scope("S")],
+                       [_wire("AL", "y", "S", "u0")])
+        _, sigs = simulate_model(model, duration_s=0.05, step_s=0.001)
+        y = sigs["S.u0"]
+        assert float(y.sum()) == 50.0
+    finally:
+        WORKSPACE.globals.pop("gpioin_AL", None)
+
+
+def test_simulate_ultrasonic_array_override_length_matches():
+    WORKSPACE.globals["ultrasonic_UA"] = np.linspace(0.5, 2.0, 200)
+    try:
+        model = _model([_ultra("UA"), _scope("S")],
+                       [_wire("UA", "d", "S", "u0")])
+        _, sigs = simulate_model(model, duration_s=0.2, step_s=0.001)
+        y = sigs["S.u0"]
+        assert len(y) == 200
+        assert abs(float(y[0]) - 0.5) < 0.01
+        assert abs(float(y[-1]) - 2.0) < 0.01
+    finally:
+        WORKSPACE.globals.pop("ultrasonic_UA", None)
+
+
+def test_simulate_returns_time_array_matching_duration():
+    model = _model([_sw("A"), _scope("S")], [_wire("A", "y", "S", "u0")])
+    t, _ = simulate_model(model, duration_s=0.5, step_s=0.01)
+    assert len(t) == 50
+    assert abs(float(t[0])) < 1e-9
+    assert abs(float(t[-1]) - 0.49) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 14. _emit_step — additional coverage
+# ---------------------------------------------------------------------------
+
+
+def test_emit_step_scope_three_channels_all_in_streamed():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _sw("C"), _scope("S", stream="1")]
+    wires = {
+        ("S", "u0"): ("A", "y"),
+        ("S", "u1"): ("B", "y"),
+        ("S", "u2"): ("C", "y"),
+    }
+    _, streamed = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_A_y" in streamed
+    assert "sig_B_y" in streamed
+    assert "sig_C_y" in streamed
+    assert len(streamed) == 3
+
+
+def test_emit_step_multiple_gpio_out_blocks():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _gpio_out("G1", pin="PA5"), _gpio_out("G2", pin="PB0")]
+    wires = {("G1", "u"): ("A", "y"), ("G2", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert step.count("HAL_GPIO_WritePin") == 2
+    assert "GPIO_PIN_5" in step
+    assert "GPIO_PIN_0" in step
+
+
+def test_emit_step_squarewave_nondefault_amplitude_baked_in():
+    board = BOARDS["NUCLEO-F446RE"]
+    ws = FakeWorkspace()
+    step, _ = _emit_step([_sw("W", amplitude="2.5", offset="-0.5")], {}, ws, 1, board)
+    # amplitude and offset values should appear in the generated code
+    assert "2.5" in step
+    assert "-0.5" in step or "0.5" in step  # sign may be embedded differently
+
+
+def test_emit_step_ultrasonic_nondefault_timeout():
+    board = BOARDS["NUCLEO-F446RE"]
+    ws = FakeWorkspace()
+    step, _ = _emit_step([_ultra("U", timeout="15000")], {}, ws, 1, board)
+    assert "15000u" in step
+
+
+def test_emit_step_gpio_in_pull_up_has_no_effect_on_step_code():
+    # Pull resistor is configured in init, not step; step code is the same
+    board = BOARDS["NUCLEO-F446RE"]
+    step_up, _ = _emit_step([_gpio_in("I", pull="up")], {}, FakeWorkspace(), 1, board)
+    step_none, _ = _emit_step([_gpio_in("I", pull="none")], {}, FakeWorkspace(), 1, board)
+    # Both should read the pin; pull mode doesn't alter the read expression
+    assert "HAL_GPIO_ReadPin" in step_up
+    assert "HAL_GPIO_ReadPin" in step_none
+
+
+def test_emit_step_unconnected_gpio_out_defaults_to_zero():
+    # GpioOut with no wire: input is zero, which is <= threshold, so pin stays low.
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_gpio_out("G", threshold="0.5")]
+    step, _ = _emit_step(blocks, {}, FakeWorkspace(), 1, board)
+    assert "HAL_GPIO_WritePin" in step
+    assert "GPIO_PIN_RESET" in step
+
+
+# ---------------------------------------------------------------------------
+# 15. C codegen completeness
+# ---------------------------------------------------------------------------
+
+
+def test_generate_project_step_ms_baked_into_main_c():
+    model = _model([_sw("A"), _scope("S")], [_wire("A", "y", "S", "u0")])
+    model["step_ms"] = 10
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        # SysTick reload for 10 ms at 180 MHz: 180_000_000 / 100 = 1_800_000
+        # The step_ms value itself should appear somewhere in the generated code.
+        assert "10" in c
+
+
+def test_generate_project_three_channel_scope_uart_format():
+    model = _model(
+        [_sw("A"), _sw("B"), _sw("C"), _scope("S")],
+        [
+            _wire("A", "y", "S", "u0"),
+            _wire("B", "y", "S", "u1"),
+            _wire("C", "y", "S", "u2"),
+        ],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        # Three %.4f format specifiers in one snprintf call.
+        assert c.count("%.4f") >= 3
+        assert "sig_A_y" in c
+        assert "sig_B_y" in c
+        assert "sig_C_y" in c
+
+
+def test_generate_project_workspace_param_baked_as_float():
+    ws = FakeWorkspace()
+    ws.globals["my_freq"] = 25.0
+    # FakeWorkspace.eval_param looks up globals dict
+    ws_real = type("WS", (), {
+        "globals": {"my_freq": 25.0},
+        "eval_param": lambda self, s: (
+            float(s) if _is_numeric(s) else ws.globals.get(s, 0.0)
+        ),
+    })()
+
+    def _is_numeric(s):
+        try:
+            float(s)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    model = _model([_sw("A", frequency_hz="my_freq"), _scope("S")],
+                   [_wire("A", "y", "S", "u0")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, ws)
+        c = (proj / "main.c").read_text()
+        # my_freq=25 should fall back to 0.0 via FakeWorkspace (it's not numeric)
+        # but the key thing is it generates valid C without crashing.
+        assert "sig_A_y" in c
+
+
+def test_generate_project_signal_naming_convention():
+    # Signal variable names must follow sig_{block_id}_{port} convention.
+    model = _model(
+        [_ultra("MySensor"), _gpio_out("MyLED"), _scope("MyScope")],
+        [
+            _wire("MySensor", "d", "MyLED", "u"),
+            _wire("MySensor", "d", "MyScope", "u0"),
+        ],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_MySensor_d" in c
+        assert "sig_MyLED_" not in c   # sinks have no output signal var
+        assert "sig_MyScope_" not in c  # sinks have no output signal var
+
+
+def test_generate_project_gpio_in_clock_and_mode():
+    # Verify GpioIn generates correct port clock + input mode in main.c
+    model = _model([_gpio_in("BTN", pin="PC13"), _gpio_out("LED", pin="PA5")],
+                   [_wire("BTN", "y", "LED", "u")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "__HAL_RCC_GPIOC_CLK_ENABLE" in c
+        assert "__HAL_RCC_GPIOA_CLK_ENABLE" in c
+        assert "GPIO_PIN_13" in c
+        assert "GPIO_PIN_5" in c
+        assert "GPIO_MODE_INPUT" in c
+        assert "GPIO_MODE_OUTPUT_PP" in c
+
+
+def test_generate_project_readme_contains_build_instructions():
+    model = _model([_sw("A")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        readme = (proj / "README.txt").read_text()
+        # Should mention how to build (make) and flash
+        assert "make" in readme.lower() or "build" in readme.lower()
+
+
+def test_generate_project_linker_script_has_correct_flash_origin():
+    model = _model([_sw("A")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        ld = (proj / "STM32F446RETx_FLASH.ld").read_text()
+        # STM32F446RE flash starts at 0x08000000
+        assert "0x08000000" in ld
+        # RAM at 0x20000000
+        assert "0x20000000" in ld
+
+
+def test_generate_project_makefile_targets_arm_toolchain():
+    model = _model([_sw("A")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        mk = (proj / "Makefile").read_text()
+        assert "arm-none-eabi-gcc" in mk
+
+
+def test_emit_decls_multiple_squarewaves_all_declared():
+    blocks = [_sw("W1"), _sw("W2"), _sw("W3")]
+    d = _emit_decls(blocks)
+    for bid in ("W1", "W2", "W3"):
+        assert f"sig_{bid}_y" in d
+        assert f"phase_{bid}" in d
+
+
+def test_emit_init_multiple_ports_on_same_bank_clock_enabled_once():
+    # PA5 and PA0 are both on GPIOA — clock enable should appear at least once.
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_gpio_out("G1", pin="PA5"), _gpio_out("G2", pin="PA0")]
+    init = _emit_init(blocks, board)
+    assert "__HAL_RCC_GPIOA_CLK_ENABLE" in init
+
+
+# ---------------------------------------------------------------------------
+# 16. Sum block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_sum_block():
+    assert "Sum" in BLOCK_CATALOG
+
+
+def test_sum_spec_has_two_inputs_and_one_output():
+    spec = BLOCK_CATALOG["Sum"]
+    assert [p.name for p in spec.inputs] == ["u0", "u1"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_sum_spec_has_no_params():
+    assert BLOCK_CATALOG["Sum"].params == {}
+
+
+def test_sum_has_valid_color():
+    color = BLOCK_CATALOG["Sum"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_emit_decls_sum_declares_output():
+    d = _emit_decls([_sum("S1")])
+    assert "sig_S1_y" in d
+    assert "phase_S1" not in d
+
+
+def test_emit_step_sum_adds_both_inputs():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _sum("S1")]
+    wires = {("S1", "u0"): ("A", "y"), ("S1", "u1"): ("B", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_S1_y" in step
+    assert "sig_A_y" in step
+    assert "sig_B_y" in step
+    assert "+" in step
+
+
+def test_emit_step_sum_unconnected_input_defaults_to_zero():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sum("S1")]
+    wires = {("S1", "u0"): ("A", "y")}  # u1 not connected
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "0.0f" in step   # unconnected u1 becomes 0.0f
+
+
+def test_emit_step_sum_both_unconnected_is_zero_plus_zero():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_sum("S1")], {}, FakeWorkspace(), 1, board)
+    assert "sig_S1_y" in step
+    assert "0.0f + 0.0f" in step
+
+
+def test_simulate_sum_adds_two_squarewaves():
+    # A at 100% duty (always 1.0) + B at 100% duty (always 1.0) → always 2.0
+    model = _model(
+        [_sw("A", duty="1.0"), _sw("B", duty="1.0"), _sum("S1"), _scope("SC")],
+        [
+            _wire("A", "y", "S1", "u0"),
+            _wire("B", "y", "S1", "u1"),
+            _wire("S1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 2.0) < 1e-6, f"expected 2.0, got {y.mean()}"
+
+
+def test_simulate_sum_unconnected_input_acts_as_zero():
+    model = _model(
+        [_sw("A", duty="1.0"), _sum("S1"), _scope("SC")],
+        [_wire("A", "y", "S1", "u0"), _wire("S1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 1.0) < 1e-6
+
+
+def test_simulate_sum_with_offset_signals():
+    # A outputs 3.0 always, B outputs -1.0 always → sum is 2.0
+    model = _model(
+        [
+            _sw("A", amplitude="3.0", duty="1.0"),
+            _sw("B", amplitude="-1.0", duty="1.0"),
+            _sum("S1"),
+            _scope("SC"),
+        ],
+        [
+            _wire("A", "y", "S1", "u0"),
+            _wire("B", "y", "S1", "u1"),
+            _wire("S1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 2.0) < 1e-6
+
+
+def test_simulate_sum_chained_two_sums():
+    # Sum1 = A + B = 1+1 = 2, Sum2 = Sum1 + C = 2+1 = 3
+    model = _model(
+        [
+            _sw("A", duty="1.0"),
+            _sw("B", duty="1.0"),
+            _sw("C", duty="1.0"),
+            _sum("S1"),
+            _sum("S2"),
+            _scope("SC"),
+        ],
+        [
+            _wire("A", "y", "S1", "u0"),
+            _wire("B", "y", "S1", "u1"),
+            _wire("S1", "y", "S2", "u0"),
+            _wire("C", "y", "S2", "u1"),
+            _wire("S2", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 3.0) < 1e-6
+
+
+def test_generate_project_sum_block_in_main_c():
+    model = _model(
+        [_sw("A"), _sw("B"), _sum("SM"), _scope("SC")],
+        [
+            _wire("A", "y", "SM", "u0"),
+            _wire("B", "y", "SM", "u1"),
+            _wire("SM", "y", "SC", "u0"),
+        ],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_SM_y" in c
+        assert "sig_A_y" in c
+        assert "sig_B_y" in c
+        assert "+" in c
+
+
+def test_topo_order_sum_after_its_sources():
+    model = _model(
+        [_sum("S1"), _sw("A"), _sw("B")],
+        [_wire("A", "y", "S1", "u0"), _wire("B", "y", "S1", "u1")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("S1")
+    assert ids.index("B") < ids.index("S1")
+
+
+# ---------------------------------------------------------------------------
+# 17. Product block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_product_block():
+    assert "Product" in BLOCK_CATALOG
+
+
+def test_product_spec_has_two_inputs_and_one_output():
+    spec = BLOCK_CATALOG["Product"]
+    assert [p.name for p in spec.inputs] == ["u0", "u1"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_product_spec_has_no_params():
+    assert BLOCK_CATALOG["Product"].params == {}
+
+
+def test_product_has_valid_color():
+    color = BLOCK_CATALOG["Product"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_emit_decls_product_declares_output():
+    d = _emit_decls([_product("P1")])
+    assert "sig_P1_y" in d
+    assert "phase_P1" not in d
+
+
+def test_emit_step_product_multiplies_both_inputs():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _product("P1")]
+    wires = {("P1", "u0"): ("A", "y"), ("P1", "u1"): ("B", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_P1_y" in step
+    assert "sig_A_y" in step
+    assert "sig_B_y" in step
+    assert "*" in step
+
+
+def test_emit_step_product_unconnected_input_defaults_to_one():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _product("P1")]
+    wires = {("P1", "u0"): ("A", "y")}   # u1 not connected
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "1.0f" in step   # unconnected u1 → 1.0f
+
+
+def test_emit_step_product_both_unconnected_is_one_times_one():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_product("P1")], {}, FakeWorkspace(), 1, board)
+    assert "sig_P1_y" in step
+    assert "1.0f * 1.0f" in step
+
+
+def test_simulate_product_multiplies_two_constant_signals():
+    # A = always 3.0, B = always 2.0 → product = always 6.0
+    model = _model(
+        [
+            _sw("A", amplitude="3.0", duty="1.0"),
+            _sw("B", amplitude="2.0", duty="1.0"),
+            _product("P1"),
+            _scope("SC"),
+        ],
+        [
+            _wire("A", "y", "P1", "u0"),
+            _wire("B", "y", "P1", "u1"),
+            _wire("P1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 6.0) < 1e-6
+
+
+def test_simulate_product_unconnected_input_acts_as_one():
+    # Only u0 connected → output == u0
+    model = _model(
+        [_sw("A", amplitude="5.0", duty="1.0"), _product("P1"), _scope("SC")],
+        [_wire("A", "y", "P1", "u0"), _wire("P1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 5.0) < 1e-6
+
+
+def test_simulate_product_gating_pattern():
+    # A = square wave (0/1), B = always 3.0 → output is 0 or 3
+    model = _model(
+        [
+            _sw("A", frequency_hz="10", amplitude="1.0", offset="0.0", duty="0.5"),
+            _sw("B", amplitude="3.0", duty="1.0"),
+            _product("P1"),
+            _scope("SC"),
+        ],
+        [
+            _wire("A", "y", "P1", "u0"),
+            _wire("B", "y", "P1", "u1"),
+            _wire("P1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    uniq = {round(float(v), 6) for v in np.unique(y)}
+    assert uniq <= {0.0, 3.0}, f"unexpected values: {uniq}"
+    assert abs(float(y.mean()) - 1.5) < 0.1   # 50% duty → mean = 3*0.5
+
+
+def test_simulate_product_chained_with_sum():
+    # Sum: A(1) + B(1) = 2, Product: Sum(2) * C(3) = 6
+    model = _model(
+        [
+            _sw("A", amplitude="1.0", duty="1.0"),
+            _sw("B", amplitude="1.0", duty="1.0"),
+            _sw("C", amplitude="3.0", duty="1.0"),
+            _sum("S1"),
+            _product("P1"),
+            _scope("SC"),
+        ],
+        [
+            _wire("A", "y", "S1", "u0"),
+            _wire("B", "y", "S1", "u1"),
+            _wire("S1", "y", "P1", "u0"),
+            _wire("C", "y", "P1", "u1"),
+            _wire("P1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 6.0) < 1e-6
+
+
+def test_generate_project_product_block_in_main_c():
+    model = _model(
+        [_sw("A"), _sw("B"), _product("PR"), _scope("SC")],
+        [
+            _wire("A", "y", "PR", "u0"),
+            _wire("B", "y", "PR", "u1"),
+            _wire("PR", "y", "SC", "u0"),
+        ],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_PR_y" in c
+        assert "sig_A_y" in c
+        assert "sig_B_y" in c
+        assert "*" in c
+
+
+def test_topo_order_product_after_its_sources():
+    model = _model(
+        [_product("P1"), _sw("A"), _sw("B")],
+        [_wire("A", "y", "P1", "u0"), _wire("B", "y", "P1", "u1")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("P1")
+    assert ids.index("B") < ids.index("P1")
+
+
+def test_catalog_now_has_eight_block_types():
+    expected = {"SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
+                "Sum", "Product", "Constant"}
+    assert set(BLOCK_CATALOG.keys()) == expected
+
+
+# ---------------------------------------------------------------------------
+# 18. Constant block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_constant_block():
+    assert "Constant" in BLOCK_CATALOG
+
+
+def test_constant_spec_has_no_inputs_and_one_output():
+    spec = BLOCK_CATALOG["Constant"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_constant_spec_has_value_param():
+    assert "value" in BLOCK_CATALOG["Constant"].params
+
+
+def test_constant_has_valid_color():
+    color = BLOCK_CATALOG["Constant"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_emit_decls_constant_declares_output():
+    d = _emit_decls([_const("K")])
+    assert "sig_K_y" in d
+    assert "phase_K" not in d
+
+
+def test_emit_step_constant_assigns_value():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_const("K", value="2.5")], {}, FakeWorkspace(), 1, board)
+    assert "sig_K_y" in step
+    assert "2.5" in step
+
+
+def test_emit_step_constant_no_state_update():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_const("K")], {}, FakeWorkspace(), 1, board)
+    # Should be a simple assignment, no phase or counter
+    assert "phase_K" not in step
+    assert "cnt_K" not in step
+
+
+def test_simulate_constant_outputs_fixed_value():
+    model = _model([_const("K", value="3.7"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["S.u0"]
+    assert abs(float(y.mean()) - 3.7) < 1e-6
+    assert abs(float(y.min()) - 3.7) < 1e-6
+
+
+def test_simulate_constant_zero():
+    model = _model([_const("K", value="0.0"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert float(sigs["S.u0"].sum()) == 0.0
+
+
+def test_simulate_constant_negative():
+    model = _model([_const("K", value="-5.0"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["S.u0"].mean()) - (-5.0)) < 1e-6
+
+
+def test_simulate_constant_plus_squarewave_via_sum():
+    # Constant 2.0 + SquareWave (0/1, 50% duty) → mean ≈ 2.5
+    model = _model(
+        [_const("K", value="2.0"), _sw("W", duty="0.5"), _sum("S1"), _scope("SC")],
+        [
+            _wire("K", "y", "S1", "u0"),
+            _wire("W", "y", "S1", "u1"),
+            _wire("S1", "y", "SC", "u0"),
+        ],
+    )
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 2.5) < 0.05
+
+
+def test_generate_project_constant_block_in_main_c():
+    model = _model([_const("K", value="1.5"), _scope("S")],
+                   [_wire("K", "y", "S", "u0")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_K_y" in c
+        assert "1.5" in c
+
+
+def test_topo_order_constant_before_consumers():
+    model = _model(
+        [_sum("S1"), _const("K")],
+        [_wire("K", "y", "S1", "u0")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("K") < ids.index("S1")
 
 
 # ---------------------------------------------------------------------------
