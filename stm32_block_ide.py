@@ -793,6 +793,7 @@ class LiveScopeTab(QWidget):
         self._data: Dict[int, List[Tuple[float, float]]] = {}
         self._max_pts = 200_000
         self._dirty = False
+        self._t0: Optional[float] = None  # timestamp of first sample after connect
 
         self._repaint_timer = QTimer(self)
         self._repaint_timer.setInterval(33)
@@ -818,6 +819,13 @@ class LiveScopeTab(QWidget):
 
     def toggle_connect(self) -> None:
         if self._reader is None:
+            # Reconnecting — clear old data so the plot restarts from 0 s.
+            self._data.clear()
+            self._dirty = False
+            self._t0 = None
+            if self.plot:
+                self.plot.clear()
+            self._curves = []
             port = self.port_box.currentText()
             if port == "(none)":
                 return
@@ -826,21 +834,21 @@ class LiveScopeTab(QWidget):
             self._reader.status.connect(self.status_lbl.setText)
             self._reader.start()
             self.connect_btn.setText("Disconnect")
+            self.status_lbl.setText(f"connected — {port}")
         else:
             self._reader.stop()
             self._reader.wait(1000)
             self._reader = None
             self.connect_btn.setText("Connect")
-            self._data.clear()
-            self._dirty = False
-            if self.plot:
-                self.plot.clear()
-            self._curves = []
+            self.status_lbl.setText("paused")
 
     def _on_sample(self, t: float, channels: List[float]) -> None:
+        if self._t0 is None:
+            self._t0 = t
+        t_rel = t - self._t0
         for i, v in enumerate(channels):
             buf = self._data.setdefault(i, [])
-            buf.append((t, v))
+            buf.append((t_rel, v))
             if len(buf) > self._max_pts:
                 del buf[: len(buf) - self._max_pts]
         self._dirty = True
