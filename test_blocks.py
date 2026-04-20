@@ -40,6 +40,7 @@ sys.path.insert(0, str(HERE))
 
 from code_templates import (  # noqa: E402
     BOARDS,
+    _bilinear_tf,
     _emit_decls,
     _emit_helpers,
     _emit_init,
@@ -1625,6 +1626,883 @@ def test_topo_order_constant_before_consumers():
     )
     ids = [b["id"] for b in _topo_order(model)]
     assert ids.index("K") < ids.index("S1")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for new block types (sections 19–23)
+# ---------------------------------------------------------------------------
+
+
+def _step(bid="ST", step_time="0.5", initial_value="0.0", final_value="1.0"):
+    return {
+        "type": "Step", "id": bid, "x": 0, "y": 0,
+        "params": {
+            "step_time": step_time,
+            "initial_value": initial_value,
+            "final_value": final_value,
+        },
+    }
+
+
+def _integrator(bid="INT", initial_value="0.0",
+                upper_limit="1e10", lower_limit="-1e10"):
+    return {
+        "type": "Integrator", "id": bid, "x": 0, "y": 0,
+        "params": {
+            "initial_value": initial_value,
+            "upper_limit": upper_limit,
+            "lower_limit": lower_limit,
+        },
+    }
+
+
+def _transferfcn(bid="TF", numerator="1", denominator="1 1"):
+    return {
+        "type": "TransferFcn", "id": bid, "x": 0, "y": 0,
+        "params": {"numerator": numerator, "denominator": denominator},
+    }
+
+
+def _pid(bid="PID1", Kp="1.0", Ki="0.0", Kd="0.0", N="100.0",
+         upper_limit="1e10", lower_limit="-1e10"):
+    return {
+        "type": "PID", "id": bid, "x": 0, "y": 0,
+        "params": {
+            "Kp": Kp, "Ki": Ki, "Kd": Kd, "N": N,
+            "upper_limit": upper_limit,
+            "lower_limit": lower_limit,
+        },
+    }
+
+
+def _toworkspace(bid="TW", variable_name="yout", max_points="10000",
+                 decimation="1", save_time="1"):
+    return {
+        "type": "ToWorkspace", "id": bid, "x": 0, "y": 0,
+        "params": {
+            "variable_name": variable_name,
+            "max_points": max_points,
+            "decimation": decimation,
+            "save_time": save_time,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 19. Step block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_step_block():
+    assert "Step" in BLOCK_CATALOG
+
+
+def test_step_spec_has_no_inputs_and_one_output():
+    spec = BLOCK_CATALOG["Step"]
+    assert spec.inputs == [], "Step must have no inputs (source block)"
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_step_spec_has_required_params():
+    params = BLOCK_CATALOG["Step"].params
+    for key in ("step_time", "initial_value", "final_value"):
+        assert key in params, f"Step missing param '{key}'"
+
+
+def test_step_has_valid_color():
+    color = BLOCK_CATALOG["Step"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_step_has_description():
+    desc = BLOCK_CATALOG["Step"].description
+    assert desc and len(desc) > 10
+
+
+def test_emit_decls_step_declares_output():
+    d = _emit_decls([_step("ST1")])
+    assert "sig_ST1_y" in d
+
+
+def test_emit_step_step_generates_output_variable():
+    board = BOARDS["NUCLEO-F446RE"]
+    step_c, _ = _emit_step([_step("ST1")], {}, FakeWorkspace(), 1, board)
+    assert "sig_ST1_y" in step_c
+
+
+def test_emit_step_step_contains_counter_or_time_compare():
+    """C code should compare tick count or elapsed time against step_time."""
+    board = BOARDS["NUCLEO-F446RE"]
+    step_c, _ = _emit_step([_step("ST1", step_time="0.5")], {}, FakeWorkspace(), 1, board)
+    # Expect either a static counter variable or a float time comparison
+    has_counter = "_cnt_ST1" in step_c
+    has_compare = ("ST1" in step_c and (">" in step_c or ">=" in step_c))
+    assert has_counter or has_compare, (
+        f"Step C code must compare time or count.\nGot:\n{step_c}"
+    )
+
+
+def test_simulate_step_outputs_initial_before_step_time():
+    model = _model(
+        [_step("ST", step_time="0.5", initial_value="2.0", final_value="5.0"),
+         _scope("SC")],
+        [_wire("ST", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # t[0..499] ≈ 0.0, 0.001, ..., 0.499 — all before 0.5 → initial_value
+    before = y[t < 0.5]
+    assert len(before) > 0
+    assert abs(float(before.mean()) - 2.0) < 1e-6, (
+        f"Expected 2.0 before step, got {before.mean():.4f}"
+    )
+
+
+def test_simulate_step_outputs_final_after_step_time():
+    model = _model(
+        [_step("ST", step_time="0.5", initial_value="2.0", final_value="5.0"),
+         _scope("SC")],
+        [_wire("ST", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    after = y[t >= 0.5]
+    assert len(after) > 0
+    assert abs(float(after.mean()) - 5.0) < 1e-6, (
+        f"Expected 5.0 after step, got {after.mean():.4f}"
+    )
+
+
+def test_simulate_step_transitions_exactly_at_step_time():
+    """Value at exactly t=step_time should be final_value."""
+    model = _model(
+        [_step("ST", step_time="0.3", initial_value="0.0", final_value="1.0"),
+         _scope("SC")],
+        [_wire("ST", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=0.6, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Find the sample at t=0.3 (index 300)
+    idx = np.argmin(np.abs(t - 0.3))
+    assert float(y[idx]) == 1.0, f"At t=0.3 expected 1.0, got {y[idx]}"
+
+
+def test_simulate_step_zero_initial_nonzero_final():
+    model = _model(
+        [_step("ST", step_time="0.0", initial_value="0.0", final_value="7.0"),
+         _scope("SC")],
+        [_wire("ST", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # step_time=0 → all samples at or after t=0 → all final_value
+    assert abs(float(y.mean()) - 7.0) < 1e-6
+
+
+def test_simulate_step_negative_values():
+    model = _model(
+        [_step("ST", step_time="0.5", initial_value="-3.0", final_value="-1.0"),
+         _scope("SC")],
+        [_wire("ST", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y[t < 0.5].mean()) == -3.0
+    assert float(y[t >= 0.5].mean()) == -1.0
+
+
+def test_generate_project_step_block_in_main_c():
+    model = _model([_step("ST"), _scope("SC")], [_wire("ST", "y", "SC", "u0")])
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_ST_y" in c
+
+
+def test_topo_order_step_before_consumers():
+    model = _model(
+        [_sum("S1"), _step("ST")],
+        [_wire("ST", "y", "S1", "u0")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("ST") < ids.index("S1")
+
+
+# ---------------------------------------------------------------------------
+# 20. Integrator block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_integrator_block():
+    assert "Integrator" in BLOCK_CATALOG
+
+
+def test_integrator_spec_has_one_input_and_one_output():
+    spec = BLOCK_CATALOG["Integrator"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_integrator_spec_has_required_params():
+    params = BLOCK_CATALOG["Integrator"].params
+    for key in ("initial_value", "upper_limit", "lower_limit"):
+        assert key in params, f"Integrator missing param '{key}'"
+
+
+def test_integrator_has_valid_color():
+    color = BLOCK_CATALOG["Integrator"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_integrator_has_description():
+    desc = BLOCK_CATALOG["Integrator"].description
+    assert desc and len(desc) > 10
+
+
+def test_emit_decls_integrator_declares_output():
+    d = _emit_decls([_integrator("INT1")])
+    assert "sig_INT1_y" in d
+
+
+def test_emit_step_integrator_generates_state_and_output():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _integrator("INT1")]
+    wires = {("INT1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_INT1_y" in step_c
+    # Should have a static state variable for accumulation
+    assert "_state_INT1" in step_c
+
+
+def test_emit_step_integrator_uses_plus_equals():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _integrator("INT1")]
+    wires = {("INT1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "+=" in step_c
+
+
+def test_simulate_integrator_integrates_constant_input():
+    """Integral of constant 1.0 over time = t  (forward Euler)."""
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"), _integrator("INT"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Forward Euler: y[0]=0, y[k] = (k) * 0.001  → y[-1] ≈ 0.999
+    assert abs(float(y[-1]) - 0.999) < 0.01, f"y[-1]={y[-1]:.4f}"
+    # Mean of 0..0.999 ≈ 0.499
+    assert abs(float(y.mean()) - 0.4995) < 0.01, f"mean={y.mean():.4f}"
+
+
+def test_simulate_integrator_respects_initial_condition():
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _integrator("INT", initial_value="5.0"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # IC=5; first sample should be 5.0 (y[0] = ic before first accumulation)
+    assert abs(float(y[0]) - 5.0) < 1e-6, f"y[0]={y[0]:.4f}, expected 5.0"
+
+
+def test_simulate_integrator_upper_limit_clamps_output():
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _integrator("INT", upper_limit="0.5"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=2.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.max()) <= 0.5 + 1e-9, f"max={y.max():.4f} exceeds upper_limit 0.5"
+
+
+def test_simulate_integrator_lower_limit_clamps_output():
+    model = _model(
+        [_sw("A", amplitude="-1.0", duty="1.0"),
+         _integrator("INT", lower_limit="-0.3"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=2.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.min()) >= -0.3 - 1e-9, f"min={y.min():.4f} below lower_limit -0.3"
+
+
+def test_simulate_integrator_zero_input_holds_ic():
+    model = _model(
+        [_sw("A", amplitude="0.0", duty="1.0"),
+         _integrator("INT", initial_value="3.0"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Zero input → output stays at IC forever
+    assert abs(float(y.mean()) - 3.0) < 1e-6
+
+
+def test_generate_project_integrator_block_in_main_c():
+    model = _model(
+        [_sw("A"), _integrator("INT"), _scope("SC")],
+        [_wire("A", "y", "INT", "u"), _wire("INT", "y", "SC", "u0")],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_INT_y" in c
+        assert "_state_INT" in c
+
+
+def test_topo_order_integrator_after_source():
+    model = _model(
+        [_integrator("INT"), _sw("A")],
+        [_wire("A", "y", "INT", "u")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("INT")
+
+
+# ---------------------------------------------------------------------------
+# 21. TransferFcn block + _bilinear_tf — catalog, bilinear math, simulator,
+#     codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_transferfcn_block():
+    assert "TransferFcn" in BLOCK_CATALOG
+
+
+def test_transferfcn_spec_has_one_input_and_one_output():
+    spec = BLOCK_CATALOG["TransferFcn"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_transferfcn_spec_has_required_params():
+    params = BLOCK_CATALOG["TransferFcn"].params
+    assert "numerator" in params
+    assert "denominator" in params
+
+
+def test_transferfcn_has_valid_color():
+    color = BLOCK_CATALOG["TransferFcn"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_transferfcn_has_description():
+    desc = BLOCK_CATALOG["TransferFcn"].description
+    assert desc and len(desc) > 10
+
+
+# --- _bilinear_tf math tests ---
+
+
+def test_bilinear_tf_unity_gain():
+    """H(s) = 1/1 (pure gain 1).  DC gain must be 1."""
+    bz, az = _bilinear_tf("1", "1", fs=1000.0)
+    dc_gain = float(np.sum(bz) / np.sum(az))
+    assert abs(dc_gain - 1.0) < 1e-9, f"DC gain={dc_gain}"
+
+
+def test_bilinear_tf_pure_gain_two():
+    """H(s) = 2/1.  DC gain must be 2."""
+    bz, az = _bilinear_tf("2", "1", fs=1000.0)
+    dc_gain = float(np.sum(bz) / np.sum(az))
+    assert abs(dc_gain - 2.0) < 1e-9, f"DC gain={dc_gain}"
+
+
+def test_bilinear_tf_first_order_lowpass_dc_gain():
+    """H(s) = 1/(s+1).  DC gain = H(0) = 1/1 = 1."""
+    bz, az = _bilinear_tf("1", "1 1", fs=1000.0)
+    dc_gain = float(np.sum(bz) / np.sum(az))
+    assert abs(dc_gain - 1.0) < 1e-6, f"DC gain={dc_gain:.6f}"
+
+
+def test_bilinear_tf_first_order_normalized_a0():
+    """a_z[0] must always equal 1 (normalized)."""
+    bz, az = _bilinear_tf("1", "1 1", fs=500.0)
+    assert abs(float(az[0]) - 1.0) < 1e-9, f"az[0]={az[0]}"
+
+
+def test_bilinear_tf_output_shapes_match():
+    """b_z and a_z must have the same length = order + 1."""
+    bz, az = _bilinear_tf("1", "1 2 1", fs=1000.0)  # 2nd order
+    assert len(bz) == len(az), f"len(bz)={len(bz)}, len(az)={len(az)}"
+    assert len(az) == 3, f"Expected order+1=3, got {len(az)}"
+
+
+def test_bilinear_tf_second_order_dc_gain():
+    """H(s) = 4/(s^2 + 2s + 4).  DC gain = 4/4 = 1."""
+    bz, az = _bilinear_tf("4", "1 2 4", fs=1000.0)
+    dc_gain = float(np.sum(bz) / np.sum(az))
+    assert abs(dc_gain - 1.0) < 1e-6, f"DC gain={dc_gain:.6f}"
+
+
+def test_bilinear_tf_raises_on_degree_mismatch():
+    """Numerator degree > denominator degree should raise ValueError."""
+    raised = False
+    try:
+        _bilinear_tf("1 1 1", "1 1", fs=1000.0)  # order 2 num > order 1 den
+    except (ValueError, Exception):
+        raised = True
+    assert raised, "Expected an error when numerator degree > denominator degree"
+
+
+# --- Codegen tests ---
+
+
+def test_emit_decls_transferfcn_declares_output():
+    d = _emit_decls([_transferfcn("TF1")])
+    assert "sig_TF1_y" in d
+
+
+def test_emit_step_transferfcn_generates_output_variable():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _transferfcn("TF1")]
+    wires = {("TF1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_TF1_y" in step_c
+
+
+def test_emit_step_transferfcn_first_order_has_static_state():
+    """A first-order TF must declare a static IIR filter state."""
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _transferfcn("TF1", numerator="1", denominator="1 1")]
+    wires = {("TF1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "static float" in step_c
+    assert "TF1" in step_c
+
+
+def test_emit_step_transferfcn_pure_gain_no_state():
+    """H(s) = 2/1 (order 0) → pure gain assignment, no state variable."""
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _transferfcn("TF1", numerator="2", denominator="1")]
+    wires = {("TF1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_TF1_y" in step_c
+    # Pure gain: no IIR state array needed
+    assert "_s0_TF1" not in step_c
+
+
+def test_generate_project_transferfcn_block_in_main_c():
+    model = _model(
+        [_sw("A"), _transferfcn("TF"), _scope("SC")],
+        [_wire("A", "y", "TF", "u"), _wire("TF", "y", "SC", "u0")],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_TF_y" in c
+
+
+# --- Simulator tests ---
+
+
+def test_simulate_transferfcn_pure_gain():
+    """H(s) = 3/1 → output = 3 * input at all times."""
+    model = _model(
+        [_sw("A", amplitude="2.0", duty="1.0"),
+         _transferfcn("TF", numerator="3", denominator="1"),
+         _scope("SC")],
+        [_wire("A", "y", "TF", "u"), _wire("TF", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 6.0) < 1e-4, f"mean={y.mean():.4f}"
+
+
+def test_simulate_transferfcn_step_response_reaches_dc_gain():
+    """H(s)=1/(0.01s+1) with fc≈16 Hz.  A 1s step should reach ≈ DC gain=1."""
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _transferfcn("TF", numerator="1", denominator="0.01 1"),
+         _scope("SC")],
+        [_wire("A", "y", "TF", "u"), _wire("TF", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.2, step_s=0.001)
+    y = sigs["SC.u0"]
+    # After 5 time constants (0.05 s) the step response is > 99% of DC gain
+    assert float(y[-1]) > 0.95, f"Final value={y[-1]:.4f} — didn't reach DC gain"
+
+
+def test_simulate_transferfcn_passes_dc_value():
+    """H(s)=1/(s+1): constant input=1 → steady-state output=1."""
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _transferfcn("TF", numerator="1", denominator="1 1"),
+         _scope("SC")],
+        [_wire("A", "y", "TF", "u"), _wire("TF", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=10.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Last 10% of output should be very close to 1.0
+    assert abs(float(y[-100:].mean()) - 1.0) < 0.01, (
+        f"Steady-state mean={y[-100:].mean():.4f}"
+    )
+
+
+def test_topo_order_transferfcn_after_source():
+    model = _model(
+        [_transferfcn("TF"), _sw("A")],
+        [_wire("A", "y", "TF", "u")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("TF")
+
+
+# ---------------------------------------------------------------------------
+# 22. PID block — catalog, simulator, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_pid_block():
+    assert "PID" in BLOCK_CATALOG
+
+
+def test_pid_spec_has_one_input_and_one_output():
+    spec = BLOCK_CATALOG["PID"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+
+def test_pid_spec_has_required_params():
+    params = BLOCK_CATALOG["PID"].params
+    for key in ("Kp", "Ki", "Kd", "N", "upper_limit", "lower_limit"):
+        assert key in params, f"PID missing param '{key}'"
+
+
+def test_pid_has_valid_color():
+    color = BLOCK_CATALOG["PID"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_pid_has_description():
+    desc = BLOCK_CATALOG["PID"].description
+    assert desc and len(desc) > 10
+
+
+def test_emit_decls_pid_declares_output():
+    d = _emit_decls([_pid("PID1")])
+    assert "sig_PID1_y" in d
+
+
+def test_emit_step_pid_generates_state_variables():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _pid("PID1")]
+    wires = {("PID1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_PID1_y" in step_c
+    assert "_integ_PID1" in step_c
+    assert "_dstate_PID1" in step_c
+
+
+def test_emit_step_pid_contains_kp_ki_kd():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _pid("PID1", Kp="2.0", Ki="0.5", Kd="0.1")]
+    wires = {("PID1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "2.0" in step_c   # Kp
+    assert "0.5" in step_c   # Ki
+    assert "0.1" in step_c   # Kd
+
+
+def test_emit_step_pid_saturation_uses_limits():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _pid("PID1", upper_limit="10.0", lower_limit="-10.0")]
+    wires = {("PID1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "10.0" in step_c
+
+
+def test_simulate_pid_proportional_only():
+    """With Ki=0, Kd=0: output = Kp * input."""
+    model = _model(
+        [_sw("A", amplitude="3.0", duty="1.0"),
+         _pid("PID1", Kp="2.0", Ki="0.0", Kd="0.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Kp*3 = 6.0
+    assert abs(float(y.mean()) - 6.0) < 1e-4, f"mean={y.mean():.4f}"
+
+
+def test_simulate_pid_integral_ramps_up():
+    """With Kp=0, Ki=1, Kd=0 and constant error=1: output = t (forward Euler)."""
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _pid("PID1", Kp="0.0", Ki="1.0", Kd="0.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Ki*integral(1, 0..t) = t  → y[-1] ≈ 0.999 (forward Euler, starts at 0)
+    assert abs(float(y[-1]) - 0.999) < 0.01, f"y[-1]={y[-1]:.4f}"
+
+
+def test_simulate_pid_upper_limit_clamps():
+    model = _model(
+        [_sw("A", amplitude="100.0", duty="1.0"),
+         _pid("PID1", Kp="10.0", upper_limit="5.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.max()) <= 5.0 + 1e-9, f"max={y.max():.4f} exceeds upper_limit 5.0"
+
+
+def test_simulate_pid_lower_limit_clamps():
+    model = _model(
+        [_sw("A", amplitude="-100.0", duty="1.0"),
+         _pid("PID1", Kp="10.0", lower_limit="-5.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.min()) >= -5.0 - 1e-9, f"min={y.min():.4f} below lower_limit -5.0"
+
+
+def test_simulate_pid_derivative_only_responds_to_change():
+    """With Kp=0, Ki=0, Kd>0: derivative of constant=0, so output≈0 after IC."""
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _pid("PID1", Kp="0.0", Ki="0.0", Kd="1.0", N="100.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["SC.u0"]
+    # After initial transient, constant input → derivative → 0
+    # Tail average (last 20%) should be close to 0
+    tail = y[int(len(y) * 0.8):]
+    assert abs(float(tail.mean())) < 0.1, f"tail mean={tail.mean():.4f}"
+
+
+def test_simulate_pid_zero_gain_passthrough_zero():
+    model = _model(
+        [_sw("A", amplitude="5.0", duty="1.0"),
+         _pid("PID1", Kp="0.0", Ki="0.0", Kd="0.0"),
+         _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.sum())) < 1e-6, f"Expected all zeros, sum={y.sum()}"
+
+
+def test_generate_project_pid_block_in_main_c():
+    model = _model(
+        [_sw("A"), _pid("PID1"), _scope("SC")],
+        [_wire("A", "y", "PID1", "u"), _wire("PID1", "y", "SC", "u0")],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        assert "sig_PID1_y" in c
+        assert "_integ_PID1" in c
+
+
+def test_topo_order_pid_after_source():
+    model = _model(
+        [_pid("PID1"), _sw("A")],
+        [_wire("A", "y", "PID1", "u")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("PID1")
+
+
+# ---------------------------------------------------------------------------
+# 23. ToWorkspace block — catalog, simulator, workspace integration, codegen
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_has_toworkspace_block():
+    assert "ToWorkspace" in BLOCK_CATALOG
+
+
+def test_toworkspace_spec_has_one_input_no_outputs():
+    spec = BLOCK_CATALOG["ToWorkspace"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert spec.outputs == [], "ToWorkspace has no outputs (sink block)"
+
+
+def test_toworkspace_spec_has_required_params():
+    params = BLOCK_CATALOG["ToWorkspace"].params
+    for key in ("variable_name", "max_points", "decimation", "save_time"):
+        assert key in params, f"ToWorkspace missing param '{key}'"
+
+
+def test_toworkspace_has_valid_color():
+    color = BLOCK_CATALOG["ToWorkspace"].color
+    assert color.startswith("#") and len(color) == 7
+
+
+def test_toworkspace_has_description():
+    desc = BLOCK_CATALOG["ToWorkspace"].description
+    assert desc and len(desc) > 10
+
+
+def test_emit_step_toworkspace_is_noop():
+    """ToWorkspace should emit only a comment (no-op) in C."""
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _toworkspace("TW1", variable_name="out1")]
+    wires = {("TW1", "u"): ("A", "y")}
+    step_c, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    # No assignment to a sig_ variable for TW1 (sink block, no output)
+    assert "sig_TW1_y" not in step_c
+
+
+def test_emit_step_toworkspace_leaves_no_output_signal():
+    """No output signal variable should be declared for a ToWorkspace block."""
+    d = _emit_decls([_toworkspace("TW1")])
+    assert "sig_TW1_y" not in d
+
+
+def test_simulate_toworkspace_writes_to_workspace():
+    """After simulate_model, the named variable should be in WORKSPACE.globals."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _toworkspace("TW", variable_name="my_signal")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert "my_signal" in WORKSPACE.globals, (
+        f"'my_signal' not found in workspace; keys={list(WORKSPACE.globals)}"
+    )
+
+
+def test_simulate_toworkspace_written_value_is_ndarray():
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="2.0", duty="1.0"),
+         _toworkspace("TW", variable_name="arr_out")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    simulate_model(model, duration_s=0.05, step_s=0.001)
+    val = WORKSPACE.globals.get("arr_out")
+    assert isinstance(val, np.ndarray), f"Expected ndarray, got {type(val)}"
+
+
+def test_simulate_toworkspace_signal_values_correct():
+    """Values written to workspace should match the source signal."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="3.0", duty="1.0"),
+         _toworkspace("TW", variable_name="sig3")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    simulate_model(model, duration_s=0.1, step_s=0.001)
+    arr = WORKSPACE.globals["sig3"]
+    assert abs(float(arr.mean()) - 3.0) < 1e-4, f"mean={arr.mean():.4f}"
+
+
+def test_simulate_toworkspace_saves_time_vector_when_requested():
+    """When save_time='1', a '<name>_t' time vector should also be saved."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _toworkspace("TW", variable_name="ysig", save_time="1")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    simulate_model(model, duration_s=0.05, step_s=0.001)
+    assert "ysig_t" in WORKSPACE.globals, (
+        f"Time vector 'ysig_t' not found; keys={list(WORKSPACE.globals)}"
+    )
+
+
+def test_simulate_toworkspace_no_time_vector_when_disabled():
+    """When save_time='0', no '<name>_t' variable should appear."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _toworkspace("TW", variable_name="ysig2", save_time="0")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    simulate_model(model, duration_s=0.05, step_s=0.001)
+    assert "ysig2_t" not in WORKSPACE.globals, (
+        "Time vector should not be saved when save_time='0'"
+    )
+
+
+def test_simulate_toworkspace_max_points_truncates():
+    """max_points should cap the length of the saved array."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _toworkspace("TW", variable_name="capped", max_points="50")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    # 1000 samples generated but max_points=50
+    simulate_model(model, duration_s=1.0, step_s=0.001)
+    arr = WORKSPACE.globals.get("capped")
+    assert arr is not None
+    assert len(arr) <= 50, f"Expected at most 50 points, got {len(arr)}"
+
+
+def test_simulate_toworkspace_decimation_reduces_samples():
+    """decimation=10 should save every 10th sample."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _toworkspace("TW", variable_name="decimated",
+                      decimation="10", max_points="10000")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    # 1000 total samples; decimation=10 → ~100 saved
+    simulate_model(model, duration_s=1.0, step_s=0.001)
+    arr = WORKSPACE.globals.get("decimated")
+    assert arr is not None
+    assert len(arr) <= 110, f"Expected ~100 points after decimation, got {len(arr)}"
+    assert len(arr) >= 90, f"Expected ~100 points after decimation, got {len(arr)}"
+
+
+def test_simulate_toworkspace_multiple_blocks_independent():
+    """Two ToWorkspace blocks with different names must not overwrite each other."""
+    WORKSPACE.globals.clear()
+    model = _model(
+        [_sw("A", amplitude="1.0", duty="1.0"),
+         _sw("B", amplitude="5.0", duty="1.0"),
+         _toworkspace("TW1", variable_name="sig_a"),
+         _toworkspace("TW2", variable_name="sig_b")],
+        [
+            _wire("A", "y", "TW1", "u"),
+            _wire("B", "y", "TW2", "u"),
+        ],
+    )
+    simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert "sig_a" in WORKSPACE.globals
+    assert "sig_b" in WORKSPACE.globals
+    assert abs(float(WORKSPACE.globals["sig_a"].mean()) - 1.0) < 1e-4
+    assert abs(float(WORKSPACE.globals["sig_b"].mean()) - 5.0) < 1e-4
+
+
+def test_generate_project_toworkspace_block_noop_in_main_c():
+    """ToWorkspace generates only a comment in C — no data-capture code."""
+    model = _model(
+        [_sw("A"), _toworkspace("TW", variable_name="data")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        c = (proj / "main.c").read_text()
+        # No assignment to a non-existent sig_TW_y variable
+        assert "sig_TW_y" not in c
+
+
+def test_topo_order_toworkspace_after_source():
+    model = _model(
+        [_toworkspace("TW"), _sw("A")],
+        [_wire("A", "y", "TW", "u")],
+    )
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("TW")
 
 
 # ---------------------------------------------------------------------------
