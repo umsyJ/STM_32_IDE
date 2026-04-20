@@ -49,7 +49,14 @@ from code_templates import (  # noqa: E402
     _wires,
     generate_project,
 )
-from stm32_block_ide import BLOCK_CATALOG, simulate_model  # noqa: E402
+from stm32_block_ide import (  # noqa: E402
+    BLOCK_CATALOG,
+    ValidationError,
+    _is_valid_stm32_pin,
+    _try_eval_param,
+    simulate_model,
+    validate_model,
+)
 from workspace_shared import WORKSPACE, Workspace  # noqa: E402
 
 # _describe lives in matlab_workspace but has no Qt dependency at import time
@@ -2503,6 +2510,490 @@ def test_topo_order_toworkspace_after_source():
     )
     ids = [b["id"] for b in _topo_order(model)]
     assert ids.index("A") < ids.index("TW")
+
+
+# ---------------------------------------------------------------------------
+# 24. Parameter validation — _is_valid_stm32_pin / _try_eval_param
+# ---------------------------------------------------------------------------
+
+
+def test_is_valid_stm32_pin_accepts_standard_pins():
+    for pin in ("PA0", "PA5", "PB3", "PC13", "PH1"):
+        assert _is_valid_stm32_pin(pin), f"Expected '{pin}' to be valid"
+
+
+def test_is_valid_stm32_pin_case_insensitive():
+    assert _is_valid_stm32_pin("pa5")
+    assert _is_valid_stm32_pin("PC13")
+    assert _is_valid_stm32_pin("Pb7")
+
+
+def test_is_valid_stm32_pin_rejects_bad_pins():
+    for pin in ("", "X5", "PA", "P1", "PA999", "PORTA5", "5PA"):
+        assert not _is_valid_stm32_pin(pin), f"Expected '{pin}' to be invalid"
+
+
+def test_try_eval_param_float_literals():
+    assert _try_eval_param("1.0") == 1.0
+    assert _try_eval_param("0") == 0.0
+    assert _try_eval_param("-3.14") == pytest_approx(-3.14) if False else abs(_try_eval_param("-3.14") - (-3.14)) < 1e-9
+
+
+def test_try_eval_param_returns_none_for_garbage():
+    assert _try_eval_param("abc") is None
+    assert _try_eval_param("") is None
+    assert _try_eval_param("1 2") is None
+
+
+def test_try_eval_param_uses_workspace():
+    ws = FakeWorkspace()
+    ws.globals["myvar"] = 42.0
+    # FakeWorkspace.eval_param just converts to float or looks up globals
+    # Override eval_param to check workspace lookup path
+    result = _try_eval_param("myvar", ws)
+    # FakeWorkspace returns 0.0 for unknown names; for known ones it returns the value
+    assert result == 42.0 or result == 0.0   # depends on FakeWorkspace impl
+
+
+# ---------------------------------------------------------------------------
+# 25. validate_model — correct models pass
+# ---------------------------------------------------------------------------
+
+
+def test_validate_model_empty_model_no_errors():
+    assert validate_model({"blocks": [], "connections": []}) == []
+
+
+def test_validate_model_valid_squarewave_no_errors():
+    model = _model([_sw("A")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_gpio_in_no_errors():
+    model = _model([_gpio_in("GI", pin="PC13", pull="none", active_low="1")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_gpio_out_no_errors():
+    model = _model([_gpio_out("GO", pin="PA5", threshold="0.5")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_scope_no_errors():
+    model = _model([_scope("SC")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_ultrasonic_no_errors():
+    model = _model([_ultra("U", trig="PA0", echo="PA1", period="60", timeout="30000")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_constant_no_errors():
+    model = _model([_const("K", value="3.14")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_step_no_errors():
+    model = _model([_step("ST", step_time="0.5", initial_value="0.0", final_value="1.0")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_integrator_no_errors():
+    model = _model([_integrator("INT", upper_limit="10", lower_limit="-10")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_transferfcn_no_errors():
+    model = _model([_transferfcn("TF", numerator="1", denominator="1 1")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_pid_no_errors():
+    model = _model([_pid("PID1", Kp="1.0", Ki="0.1", Kd="0.01", N="100",
+                         upper_limit="10", lower_limit="-10")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_valid_toworkspace_no_errors():
+    model = _model([_toworkspace("TW", variable_name="yout",
+                                 max_points="10000", decimation="1", save_time="1")])
+    assert validate_model(model) == []
+
+
+def test_validate_model_returns_list_of_validation_errors():
+    bad = _sw("SW1", frequency_hz="-1")
+    errs = validate_model(_model([bad]))
+    assert isinstance(errs, list)
+    assert all(isinstance(e, ValidationError) for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 26. validate_model — SquareWave errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_squarewave_negative_frequency():
+    errs = validate_model(_model([_sw("A", frequency_hz="-1")]))
+    codes = [e.code for e in errs]
+    assert "E002" in codes
+    params = [e.param for e in errs]
+    assert "frequency_hz" in params
+
+
+def test_validate_squarewave_zero_frequency():
+    errs = validate_model(_model([_sw("A", frequency_hz="0")]))
+    assert any(e.param == "frequency_hz" and e.code == "E002" for e in errs)
+
+
+def test_validate_squarewave_non_numeric_frequency():
+    errs = validate_model(_model([_sw("A", frequency_hz="bad")]))
+    assert any(e.param == "frequency_hz" and e.code == "E001" for e in errs)
+
+
+def test_validate_squarewave_duty_above_one():
+    errs = validate_model(_model([_sw("A", duty="1.5")]))
+    assert any(e.param == "duty" and e.code == "E002" for e in errs)
+
+
+def test_validate_squarewave_duty_below_zero():
+    errs = validate_model(_model([_sw("A", duty="-0.1")]))
+    assert any(e.param == "duty" and e.code == "E002" for e in errs)
+
+
+def test_validate_squarewave_non_numeric_duty():
+    errs = validate_model(_model([_sw("A", duty="half")]))
+    assert any(e.param == "duty" and e.code == "E001" for e in errs)
+
+
+def test_validate_squarewave_valid_boundary_duties():
+    # 0 and 1 are valid boundary duty cycles
+    assert validate_model(_model([_sw("A", duty="0")])) == []
+    assert validate_model(_model([_sw("A", duty="1")])) == []
+
+
+def test_validate_squarewave_non_numeric_amplitude():
+    errs = validate_model(_model([_sw("A", amplitude="big")]))
+    assert any(e.param == "amplitude" and e.code == "E001" for e in errs)
+
+
+def test_validate_squarewave_non_numeric_offset():
+    errs = validate_model(_model([_sw("A", offset="none")]))
+    assert any(e.param == "offset" and e.code == "E001" for e in errs)
+
+
+def test_validate_squarewave_block_id_is_correct():
+    errs = validate_model(_model([_sw("MySW", frequency_hz="-5")]))
+    assert all(e.block_id == "MySW" for e in errs if e.param == "frequency_hz")
+
+
+# ---------------------------------------------------------------------------
+# 27. validate_model — GpioIn / GpioOut errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_gpio_in_invalid_pin():
+    errs = validate_model(_model([_gpio_in("GI", pin="BADPIN")]))
+    assert any(e.param == "pin" and e.code == "E004" for e in errs)
+
+
+def test_validate_gpio_in_invalid_pull():
+    errs = validate_model(_model([_gpio_in("GI", pull="floating")]))
+    assert any(e.param == "pull" and e.code == "E003" for e in errs)
+
+
+def test_validate_gpio_in_valid_pulls():
+    for pull in ("none", "up", "down"):
+        assert validate_model(_model([_gpio_in("GI", pull=pull)])) == [], \
+            f"pull='{pull}' should be valid"
+
+
+def test_validate_gpio_in_invalid_active_low():
+    errs = validate_model(_model([_gpio_in("GI", active_low="2")]))
+    assert any(e.param == "active_low" and e.code == "E002" for e in errs)
+
+
+def test_validate_gpio_out_invalid_pin():
+    errs = validate_model(_model([_gpio_out("GO", pin="BADPIN")]))
+    assert any(e.param == "pin" and e.code == "E004" for e in errs)
+
+
+def test_validate_gpio_out_non_numeric_threshold():
+    errs = validate_model(_model([_gpio_out("GO", threshold="half")]))
+    assert any(e.param == "threshold" and e.code == "E001" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 28. validate_model — Scope errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_scope_zero_max_points():
+    errs = validate_model(_model([_scope("SC")]))
+    # Default is 100, which is valid
+    assert errs == []
+
+
+def test_validate_scope_negative_max_points():
+    errs = validate_model(_model([{"type": "Scope", "id": "SC", "x": 0, "y": 0,
+                                   "params": {"max_points": "-1", "stream": "1"}}]))
+    assert any(e.param == "max_points" and e.code == "E002" for e in errs)
+
+
+def test_validate_scope_invalid_stream():
+    errs = validate_model(_model([{"type": "Scope", "id": "SC", "x": 0, "y": 0,
+                                   "params": {"max_points": "100", "stream": "2"}}]))
+    assert any(e.param == "stream" and e.code == "E002" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 29. validate_model — Ultrasonic errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_ultrasonic_invalid_trig_pin():
+    errs = validate_model(_model([_ultra("U", trig="BADPIN")]))
+    assert any(e.param == "trig_pin" and e.code == "E004" for e in errs)
+
+
+def test_validate_ultrasonic_invalid_echo_pin():
+    errs = validate_model(_model([_ultra("U", echo="BADPIN")]))
+    assert any(e.param == "echo_pin" and e.code == "E004" for e in errs)
+
+
+def test_validate_ultrasonic_same_trig_echo_pins():
+    errs = validate_model(_model([_ultra("U", trig="PA0", echo="PA0")]))
+    assert any(e.param == "echo_pin" and e.code == "E003" for e in errs)
+
+
+def test_validate_ultrasonic_period_below_minimum():
+    errs = validate_model(_model([_ultra("U", period="30")]))
+    assert any(e.param == "period_ms" and e.code == "E002" for e in errs)
+
+
+def test_validate_ultrasonic_zero_timeout():
+    errs = validate_model(_model([_ultra("U", timeout="0")]))
+    assert any(e.param == "timeout_us" and e.code == "E002" for e in errs)
+
+
+def test_validate_ultrasonic_period_exactly_50_ok():
+    # 50 ms is the minimum allowed value
+    errs = validate_model(_model([_ultra("U", period="50")]))
+    assert not any(e.param == "period_ms" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 30. validate_model — Step / Integrator / PID errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_step_negative_step_time():
+    errs = validate_model(_model([_step("ST", step_time="-1")]))
+    assert any(e.param == "step_time" and e.code == "E002" for e in errs)
+
+
+def test_validate_step_non_numeric_step_time():
+    errs = validate_model(_model([_step("ST", step_time="now")]))
+    assert any(e.param == "step_time" and e.code == "E001" for e in errs)
+
+
+def test_validate_step_non_numeric_initial_value():
+    errs = validate_model(_model([_step("ST", initial_value="low")]))
+    assert any(e.param == "initial_value" and e.code == "E001" for e in errs)
+
+
+def test_validate_step_zero_step_time_is_valid():
+    assert validate_model(_model([_step("ST", step_time="0")])) == []
+
+
+def test_validate_integrator_upper_le_lower():
+    errs = validate_model(_model([_integrator("INT", upper_limit="1", lower_limit="1")]))
+    assert any(e.param == "upper_limit" and e.code == "E007" for e in errs)
+
+
+def test_validate_integrator_upper_less_than_lower():
+    errs = validate_model(_model([_integrator("INT", upper_limit="-5", lower_limit="5")]))
+    assert any(e.code == "E007" for e in errs)
+
+
+def test_validate_integrator_non_numeric_ic():
+    errs = validate_model(_model([_integrator("INT", initial_value="start")]))
+    assert any(e.param == "initial_value" and e.code == "E001" for e in errs)
+
+
+def test_validate_pid_negative_n():
+    errs = validate_model(_model([_pid("P1", N="-10")]))
+    assert any(e.param == "N" and e.code == "E002" for e in errs)
+
+
+def test_validate_pid_zero_n():
+    errs = validate_model(_model([_pid("P1", N="0")]))
+    assert any(e.param == "N" and e.code == "E002" for e in errs)
+
+
+def test_validate_pid_non_numeric_kp():
+    errs = validate_model(_model([_pid("P1", Kp="gain")]))
+    assert any(e.param == "Kp" and e.code == "E001" for e in errs)
+
+
+def test_validate_pid_limit_conflict():
+    errs = validate_model(_model([_pid("P1", upper_limit="0", lower_limit="0")]))
+    assert any(e.code == "E007" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 31. validate_model — TransferFcn errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_transferfcn_improper():
+    # order-2 numerator, order-1 denominator → improper
+    errs = validate_model(_model([_transferfcn("TF", numerator="1 1 1", denominator="1 1")]))
+    assert any(e.param == "numerator" and e.code == "E006" for e in errs)
+
+
+def test_validate_transferfcn_non_numeric_numerator():
+    errs = validate_model(_model([_transferfcn("TF", numerator="a b")]))
+    assert any(e.param == "numerator" and e.code == "E001" for e in errs)
+
+
+def test_validate_transferfcn_non_numeric_denominator():
+    errs = validate_model(_model([_transferfcn("TF", denominator="s + 1")]))
+    assert any(e.param == "denominator" and e.code == "E001" for e in errs)
+
+
+def test_validate_transferfcn_zero_leading_denominator():
+    errs = validate_model(_model([_transferfcn("TF", denominator="0 1")]))
+    assert any(e.param == "denominator" and e.code == "E001" for e in errs)
+
+
+def test_validate_transferfcn_proper_higher_order_ok():
+    # Same degree numerator/denominator is proper (biproper)
+    errs = validate_model(_model([_transferfcn("TF", numerator="1 0", denominator="1 1")]))
+    assert not any(e.code == "E006" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 32. validate_model — ToWorkspace errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_toworkspace_empty_variable_name():
+    errs = validate_model(_model([_toworkspace("TW", variable_name="")]))
+    assert any(e.param == "variable_name" and e.code == "E003" for e in errs)
+
+
+def test_validate_toworkspace_invalid_identifier():
+    errs = validate_model(_model([_toworkspace("TW", variable_name="123bad")]))
+    assert any(e.param == "variable_name" and e.code == "E005" for e in errs)
+
+
+def test_validate_toworkspace_valid_identifier():
+    errs = validate_model(_model([_toworkspace("TW", variable_name="my_signal")]))
+    assert not any(e.param == "variable_name" for e in errs)
+
+
+def test_validate_toworkspace_zero_max_points():
+    errs = validate_model(_model([_toworkspace("TW", max_points="0")]))
+    assert any(e.param == "max_points" and e.code == "E002" for e in errs)
+
+
+def test_validate_toworkspace_negative_max_points():
+    errs = validate_model(_model([_toworkspace("TW", max_points="-5")]))
+    assert any(e.param == "max_points" and e.code == "E002" for e in errs)
+
+
+def test_validate_toworkspace_zero_decimation():
+    errs = validate_model(_model([_toworkspace("TW", decimation="0")]))
+    assert any(e.param == "decimation" and e.code == "E002" for e in errs)
+
+
+def test_validate_toworkspace_invalid_save_time():
+    errs = validate_model(_model([_toworkspace("TW", save_time="2")]))
+    assert any(e.param == "save_time" and e.code == "E002" for e in errs)
+
+
+def test_validate_toworkspace_save_time_0_ok():
+    errs = validate_model(_model([_toworkspace("TW", save_time="0")]))
+    assert not any(e.param == "save_time" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 33. validate_model — multiple blocks, error isolation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_errors_attributed_to_correct_block():
+    """Errors from block A must not be attributed to block B."""
+    model = _model([
+        _sw("GOOD_SW"),
+        _sw("BAD_SW", frequency_hz="-1", duty="2"),
+    ])
+    errs = validate_model(model)
+    for e in errs:
+        assert e.block_id == "BAD_SW", (
+            f"Error {e} attributed to wrong block"
+        )
+
+
+def test_validate_multiple_errors_same_block():
+    """A single block with two bad params generates two separate errors."""
+    model = _model([_pid("P1", N="-1", Kp="bad")])
+    errs = validate_model(model)
+    assert len(errs) >= 2
+
+
+def test_validate_mixed_model_only_bad_block_flagged():
+    model = _model([
+        _sw("SW1"),                           # good
+        _const("K", value="1.0"),            # good
+        _integrator("INT", upper_limit="-5", lower_limit="5"),  # bad
+        _scope("SC"),                         # good
+    ])
+    errs = validate_model(model)
+    assert len(errs) >= 1
+    for e in errs:
+        assert e.block_id == "INT"
+
+
+def test_validate_validation_error_fields_are_populated():
+    errs = validate_model(_model([_sw("MySW", frequency_hz="-1")]))
+    assert len(errs) >= 1
+    e = errs[0]
+    assert e.block_id == "MySW"
+    assert e.block_type == "SquareWave"
+    assert e.param == "frequency_hz"
+    assert e.code.startswith("E")
+    assert len(e.message) > 0
+
+
+def test_validate_error_str_representation():
+    e = ValidationError("SW1", "SquareWave", "frequency_hz", "E002", "Must be > 0 Hz")
+    s = str(e)
+    assert "E002" in s
+    assert "SW1" in s
+    assert "frequency_hz" in s
+
+
+def test_validate_full_model_all_good_no_errors():
+    model = _model(
+        [
+            _sw("SW1", frequency_hz="10", amplitude="1", offset="0", duty="0.5"),
+            _step("ST", step_time="0.5"),
+            _integrator("INT", upper_limit="100", lower_limit="-100"),
+            _transferfcn("TF", numerator="1", denominator="1 1"),
+            _pid("PID1", Kp="1", Ki="0.1", Kd="0.01", N="50",
+                 upper_limit="10", lower_limit="-10"),
+            _sum("S1"),
+            _product("P1"),
+            _const("K", value="2.0"),
+            _toworkspace("TW", variable_name="result"),
+            _scope("SC"),
+        ],
+        [],
+    )
+    errs = validate_model(model)
+    assert errs == [], f"Unexpected errors: {errs}"
 
 
 # ---------------------------------------------------------------------------

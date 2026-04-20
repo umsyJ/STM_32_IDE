@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import subprocess
 import threading
@@ -348,6 +349,19 @@ class Connection:
         return self.__dict__.copy()
 
 
+@dataclass
+class ValidationError:
+    """A parameter validation problem on a specific block."""
+    block_id:   str   # which block instance
+    block_type: str   # e.g. "SquareWave"
+    param:      str   # which parameter field
+    code:       str   # short code, e.g. "E001"
+    message:    str   # human-readable description
+
+    def __str__(self) -> str:
+        return f"[{self.code}] {self.block_id} · {self.param}: {self.message}"
+
+
 # ---------------------------------------------------------------------------
 # Graphics items
 # ---------------------------------------------------------------------------
@@ -395,6 +409,7 @@ class BlockItem(QGraphicsRectItem):
         self.instance = instance
         self.setBrush(QBrush(QColor(instance.spec.color)))
         self.setPen(QPen(QColor("#1b1b1b"), 1.5))
+        self._has_error: bool = False
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -402,6 +417,15 @@ class BlockItem(QGraphicsRectItem):
         )
         self.setPos(instance.x, instance.y)
         self._make_ports()
+
+    def set_error_highlight(self, on: bool) -> None:
+        """Mark or unmark the block as having a validation error."""
+        self._has_error = on
+        if on:
+            self.setPen(QPen(QColor("#ff4444"), 3))
+        else:
+            self.setPen(QPen(QColor("#1b1b1b"), 1.5))
+        self.update()
 
     def _make_ports(self) -> None:
         self.input_ports: List[PortItem] = []
@@ -424,8 +448,10 @@ class BlockItem(QGraphicsRectItem):
         painter.setPen(QPen(QColor("white")))
         f = QFont(); f.setBold(True); f.setPointSize(10)
         painter.setFont(f)
+        # Shrink the name area slightly when an error badge is showing
+        name_right_margin = -24 if self._has_error else -5
         painter.drawText(
-            self.rect().adjusted(5, 5, -5, -self.HEIGHT/2),
+            self.rect().adjusted(5, 5, name_right_margin, -self.HEIGHT/2),
             Qt.AlignLeft | Qt.AlignTop, self.instance.spec.display_name,
         )
         f2 = QFont(); f2.setPointSize(8)
@@ -434,6 +460,16 @@ class BlockItem(QGraphicsRectItem):
             self.rect().adjusted(5, self.HEIGHT/2, -5, -5),
             Qt.AlignLeft | Qt.AlignBottom, f"#{self.instance.block_id}",
         )
+        # Error badge: red circle with "!" in the top-right corner
+        if self._has_error:
+            badge = QRectF(self.WIDTH - 22, 4, 18, 18)
+            painter.setBrush(QBrush(QColor("#ff3333")))
+            painter.setPen(QPen(QColor("#cc0000"), 1))
+            painter.drawEllipse(badge)
+            fb = QFont(); fb.setBold(True); fb.setPointSize(9)
+            painter.setFont(fb)
+            painter.setPen(QPen(QColor("white")))
+            painter.drawText(badge, Qt.AlignCenter, "!")
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -732,22 +768,118 @@ class BlockPalette(QListWidget):
 
 class ParamPanel(QWidget):
 
+    # Emitted when the user clicks an error row; carries the block_id.
+    error_block_selected = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self._block: Optional[BlockItem] = None
         self.layout_ = QVBoxLayout(self)
+        self.layout_.setSpacing(4)
+
         self.title = QLabel("<i>(no block selected)</i>")
         self.title.setTextFormat(Qt.RichText)
         self.layout_.addWidget(self.title)
+
         self.form_host = QWidget()
         self.form = QFormLayout(self.form_host)
         self.layout_.addWidget(self.form_host)
+
         self.help = QLabel("")
         self.help.setWordWrap(True)
         self.help.setStyleSheet("color: #888; font-size: 11px;")
         self.layout_.addWidget(self.help)
+
         self.layout_.addStretch(1)
         self._fields: Dict[str, QLineEdit] = {}
+
+        # ---- Error panel (shown only when there are validation errors) ----
+        self._error_frame = QFrame()
+        self._error_frame.setFrameShape(QFrame.StyledPanel)
+        self._error_frame.setStyleSheet(
+            "QFrame { background: #2d0a0a; border: 1px solid #aa2222;"
+            " border-radius: 4px; }"
+        )
+        _ef_layout = QVBoxLayout(self._error_frame)
+        _ef_layout.setContentsMargins(6, 6, 6, 6)
+        _ef_layout.setSpacing(4)
+
+        _err_hdr = QHBoxLayout()
+        _err_icon = QLabel("⚠")
+        _err_icon.setStyleSheet("color: #ff6b6b; font-size: 14px;")
+        _err_hdr.addWidget(_err_icon)
+        _err_title = QLabel("Simulation Errors")
+        _err_title.setStyleSheet(
+            "color: #ff6b6b; font-weight: bold; font-size: 12px;"
+        )
+        _err_hdr.addWidget(_err_title)
+        _err_hdr.addStretch()
+        self._err_count_label = QLabel("")
+        self._err_count_label.setStyleSheet("color: #ff9999; font-size: 11px;")
+        _err_hdr.addWidget(self._err_count_label)
+        _ef_layout.addLayout(_err_hdr)
+
+        self._error_list = QListWidget()
+        self._error_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none;"
+            " color: #ffaaaa; font-size: 11px; }"
+            "QListWidget::item { padding: 4px 2px; border-bottom: 1px solid #441111; }"
+            "QListWidget::item:selected { background: #551111; color: #ffdddd; }"
+            "QListWidget::item:hover { background: #3a0d0d; }"
+        )
+        self._error_list.setSelectionMode(QListWidget.SingleSelection)
+        self._error_list.setWordWrap(True)
+        self._error_list.itemClicked.connect(self._on_error_clicked)
+        self._error_list.setMaximumHeight(220)
+        _ef_layout.addWidget(self._error_list)
+
+        _hint = QLabel("Click an error to highlight the block")
+        _hint.setStyleSheet("color: #884444; font-size: 10px; font-style: italic;")
+        _ef_layout.addWidget(_hint)
+
+        self.layout_.addWidget(self._error_frame)
+        self._error_frame.setVisible(False)
+        self._error_block_ids: List[str] = []   # parallel to _error_list rows
+
+    # ------------------------------------------------------------------
+    # Error panel helpers
+    # ------------------------------------------------------------------
+
+    def show_errors(self, errors: List) -> None:
+        """Populate and reveal the error panel with the given ValidationErrors."""
+        self._error_list.clear()
+        self._error_block_ids.clear()
+        for err in errors:
+            # Two-line display: code + location on first line, message on second
+            text = f"{err.code}  {err.block_id} · {err.param}\n    {err.message}"
+            item = QListWidgetItem(text)
+            item.setToolTip(
+                f"Block : {err.block_id}  ({err.block_type})\n"
+                f"Param : {err.param}\n"
+                f"Code  : {err.code}\n"
+                f"Error : {err.message}"
+            )
+            self._error_list.addItem(item)
+            self._error_block_ids.append(err.block_id)
+        n = len(errors)
+        self._err_count_label.setText(f"{n} error{'s' if n != 1 else ''}")
+        self._error_frame.setVisible(True)
+
+    def clear_errors(self) -> None:
+        """Hide the error panel and remove all rows."""
+        self._error_list.clear()
+        self._error_block_ids.clear()
+        self._err_count_label.setText("")
+        self._error_frame.setVisible(False)
+
+    def _on_error_clicked(self, item: QListWidgetItem) -> None:
+        idx = self._error_list.row(item)
+        if 0 <= idx < len(self._error_block_ids):
+            self.error_block_selected.emit(self._error_block_ids[idx])
+
+    # ------------------------------------------------------------------
+    # Block parameter editing
+    # ------------------------------------------------------------------
 
     def set_block(self, block: Optional[BlockItem]) -> None:
         self._block = block
@@ -1046,6 +1178,228 @@ class SimScopeTab(QWidget):
             else:
                 span = y_max - y_min
                 self.plot.setYRange(y_min - span * 0.08, y_max + span * 0.08, padding=0)
+
+
+# ---------------------------------------------------------------------------
+# Parameter validation
+# ---------------------------------------------------------------------------
+
+# STM32 pin pattern: P followed by a letter A-H and 1–2 digits (e.g. PA5, PC13)
+_PIN_RE = re.compile(r"^P[A-H]\d{1,2}$", re.IGNORECASE)
+
+
+def _try_eval_param(s: str, workspace=None) -> Optional[float]:
+    """Try to resolve parameter string *s* to a float.
+
+    Accepts numeric literals and workspace variable references.
+    Returns None if resolution fails.
+    """
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        pass
+    if workspace is not None:
+        try:
+            v = workspace.eval_param(str(s))
+            return float(v)
+        except Exception:
+            pass
+    return None
+
+
+def _is_valid_stm32_pin(pin: str) -> bool:
+    return bool(_PIN_RE.match(pin.strip()))
+
+
+def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
+    """Return a list of ValidationErrors for a single block dict."""
+    errors: List[ValidationError] = []
+    btype = b["type"]
+    bid   = b["id"]
+    p     = b.get("params", {})
+
+    def _num(param: str, default: str = "0.0") -> Optional[float]:
+        return _try_eval_param(p.get(param, default), workspace)
+
+    def _bad(param: str, code: str, msg: str) -> None:
+        errors.append(ValidationError(bid, btype, param, code, msg))
+
+    # ---- SquareWave -------------------------------------------------------
+    if btype == "SquareWave":
+        f = _num("frequency_hz", "1.0")
+        if f is None:          _bad("frequency_hz", "E001", "Must be a valid number or workspace expression")
+        elif f <= 0:           _bad("frequency_hz", "E002", "Frequency must be > 0 Hz")
+        if _num("amplitude", "1.0") is None:
+                               _bad("amplitude",    "E001", "Must be a valid number")
+        d = _num("duty", "0.5")
+        if d is None:          _bad("duty",         "E001", "Must be a valid number")
+        elif not 0.0 <= d <= 1.0:
+                               _bad("duty",         "E002", "Duty cycle must be in range [0, 1]")
+        if _num("offset", "0.0") is None:
+                               _bad("offset",       "E001", "Must be a valid number")
+
+    # ---- GpioIn -----------------------------------------------------------
+    elif btype == "GpioIn":
+        pin = p.get("pin", "").strip()
+        if not _is_valid_stm32_pin(pin):
+            _bad("pin", "E004", f"'{pin}' is not a valid STM32 pin (e.g. PC13, PA5)")
+        pull = p.get("pull", "none").strip().lower()
+        if pull not in ("none", "up", "down"):
+            _bad("pull", "E003", "Must be 'none', 'up', or 'down'")
+        al = _num("active_low", "1")
+        if al is None or int(al) not in (0, 1):
+            _bad("active_low", "E002", "Must be 0 or 1")
+
+    # ---- GpioOut ----------------------------------------------------------
+    elif btype == "GpioOut":
+        pin = p.get("pin", "").strip()
+        if not _is_valid_stm32_pin(pin):
+            _bad("pin", "E004", f"'{pin}' is not a valid STM32 pin (e.g. PA5)")
+        if _num("threshold", "0.5") is None:
+            _bad("threshold", "E001", "Must be a valid number")
+
+    # ---- Scope ------------------------------------------------------------
+    elif btype == "Scope":
+        mp = _num("max_points", "500")
+        if mp is None or mp < 1 or mp % 1 != 0:
+            _bad("max_points", "E002", "Must be a positive integer")
+        s = _num("stream", "1")
+        if s is None or int(s) not in (0, 1):
+            _bad("stream", "E002", "Must be 0 or 1")
+
+    # ---- Ultrasonic -------------------------------------------------------
+    elif btype == "Ultrasonic":
+        trig = p.get("trig_pin", "").strip()
+        echo = p.get("echo_pin", "").strip()
+        if not _is_valid_stm32_pin(trig):
+            _bad("trig_pin", "E004", f"'{trig}' is not a valid STM32 pin")
+        if not _is_valid_stm32_pin(echo):
+            _bad("echo_pin", "E004", f"'{echo}' is not a valid STM32 pin")
+        if (_is_valid_stm32_pin(trig) and _is_valid_stm32_pin(echo)
+                and trig.upper() == echo.upper()):
+            _bad("echo_pin", "E003", "TRIG and ECHO pins must be different")
+        pm = _num("period_ms", "60")
+        if pm is None:     _bad("period_ms",  "E001", "Must be a valid number")
+        elif pm < 50:      _bad("period_ms",  "E002", "Must be >= 50 ms (HC-SR04 minimum)")
+        tu = _num("timeout_us", "30000")
+        if tu is None:     _bad("timeout_us", "E001", "Must be a valid number")
+        elif tu <= 0:      _bad("timeout_us", "E002", "Must be > 0 us")
+
+    # ---- Constant ---------------------------------------------------------
+    elif btype == "Constant":
+        if _num("value", "1.0") is None:
+            _bad("value", "E001", "Must be a valid number or workspace expression")
+
+    # ---- Sum / Product — no params to validate ----------------------------
+    elif btype in ("Sum", "Product"):
+        pass
+
+    # ---- Step -------------------------------------------------------------
+    elif btype == "Step":
+        st = _num("step_time", "1.0")
+        if st is None:   _bad("step_time",     "E001", "Must be a valid number")
+        elif st < 0:     _bad("step_time",     "E002", "Step time must be >= 0")
+        if _num("initial_value", "0.0") is None:
+                         _bad("initial_value", "E001", "Must be a valid number")
+        if _num("final_value", "1.0") is None:
+                         _bad("final_value",   "E001", "Must be a valid number")
+
+    # ---- Integrator -------------------------------------------------------
+    elif btype == "Integrator":
+        if _num("initial_value", "0.0") is None:
+            _bad("initial_value", "E001", "Must be a valid number")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+
+    # ---- TransferFcn ------------------------------------------------------
+    elif btype == "TransferFcn":
+        num_str = p.get("numerator",   "1")
+        den_str = p.get("denominator", "1 1")
+        num_c: List[float] = []
+        den_c: List[float] = []
+        try:
+            num_c = [float(x) for x in num_str.split()]
+            if not num_c:
+                _bad("numerator", "E001", "Must contain at least one coefficient")
+        except ValueError:
+            _bad("numerator", "E001",
+                 "Coefficients must be space-separated numbers (e.g. '1 2 1')")
+        try:
+            den_c = [float(x) for x in den_str.split()]
+            if not den_c:
+                _bad("denominator", "E001", "Must contain at least one coefficient")
+            elif den_c[0] == 0.0:
+                _bad("denominator", "E001",
+                     "Leading denominator coefficient must be non-zero")
+        except ValueError:
+            _bad("denominator", "E001",
+                 "Coefficients must be space-separated numbers (e.g. '1 2 1')")
+        if num_c and den_c and len(num_c) > len(den_c):
+            _bad("numerator", "E006",
+                 f"Improper transfer function: numerator order {len(num_c)-1} "
+                 f"> denominator order {len(den_c)-1}")
+
+    # ---- PID --------------------------------------------------------------
+    elif btype == "PID":
+        for pname in ("Kp", "Ki", "Kd"):
+            if _num(pname, "0.0") is None:
+                _bad(pname, "E001", f"{pname} must be a valid number")
+        n = _num("N", "100.0")
+        if n is None:    _bad("N", "E001", "Must be a valid number")
+        elif n <= 0:     _bad("N", "E002", "Derivative filter bandwidth N must be > 0")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007",
+                 "upper_limit must be strictly greater than lower_limit")
+
+    # ---- ToWorkspace ------------------------------------------------------
+    elif btype == "ToWorkspace":
+        vn = p.get("variable_name", "yout").strip()
+        if not vn:
+            _bad("variable_name", "E003", "Variable name cannot be empty")
+        elif not vn.isidentifier():
+            _bad("variable_name", "E005",
+                 f"'{vn}' is not a valid Python identifier")
+        mp = _num("max_points", "10000")
+        if mp is None or mp < 1:
+            _bad("max_points", "E002", "Must be a positive integer >= 1")
+        dc = _num("decimation", "1")
+        if dc is None or dc < 1:
+            _bad("decimation", "E002", "Must be a positive integer >= 1")
+        st = _num("save_time", "1")
+        if st is None or int(st) not in (0, 1):
+            _bad("save_time", "E002", "Must be 0 or 1")
+
+    return errors
+
+
+def validate_model(model: dict, workspace=None) -> List[ValidationError]:
+    """Validate all block parameters in *model*.
+
+    Returns a (possibly empty) list of :class:`ValidationError` objects.
+    An empty list means the model is ready to simulate / generate code.
+
+    Error codes
+    -----------
+    E001  Invalid value — cannot be parsed as a number
+    E002  Out of range — numeric value violates a constraint
+    E003  Invalid option string — not one of the allowed choices
+    E004  Invalid pin name — does not match STM32 Pxnn format
+    E005  Invalid identifier — not a legal Python variable name
+    E006  Improper transfer function — numerator degree > denominator degree
+    E007  Limit conflict — upper_limit ≤ lower_limit
+    """
+    errors: List[ValidationError] = []
+    for b in model.get("blocks", []):
+        errors.extend(_validate_block(b, workspace))
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1715,7 @@ class MainWindow(QMainWindow):
         self.param_panel = ParamPanel()
         self.param_panel.setMinimumWidth(240)
         self.scene.block_selected.connect(self.param_panel.set_block)
+        self.param_panel.error_block_selected.connect(self._select_block_by_id)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.palette)
@@ -1505,6 +1860,7 @@ class MainWindow(QMainWindow):
         self.scene.__init__()
         self.view.setScene(self.scene)
         self.scene.block_selected.connect(self.param_panel.set_block)
+        self._clear_validation_errors()
         positions = {}
         for b in data["blocks"]:
             item = self.scene.add_block_by_type(b["type"], QPointF(b["x"], b["y"]))
@@ -1535,10 +1891,57 @@ class MainWindow(QMainWindow):
     def _auto_simulate(self) -> None:
         self.on_simulate()
 
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+
+    def _select_block_by_id(self, block_id: str) -> None:
+        """Select and centre-view a block by its ID (called from error panel)."""
+        item = self.scene.blocks.get(block_id)
+        if item is None:
+            return
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self.view.centerOn(item)
+        self.param_panel.set_block(item)
+
+    def _clear_validation_errors(self) -> None:
+        """Remove all error highlights and clear the error panel."""
+        for item in self.scene.blocks.values():
+            item.set_error_highlight(False)
+        self.param_panel.clear_errors()
+
+    def _show_validation_errors(self, errors: List[ValidationError]) -> None:
+        """Highlight faulty blocks and populate the error panel."""
+        bad_ids = {e.block_id for e in errors}
+        for bid, item in self.scene.blocks.items():
+            item.set_error_highlight(bid in bad_ids)
+        self.param_panel.show_errors(errors)
+        # Switch to the Block Diagram tab so the user sees the highlights
+        self.tabs.setCurrentIndex(0)
+        self.statusBar().showMessage(
+            f"Simulation blocked — {len(errors)} parameter error"
+            f"{'s' if len(errors) != 1 else ''} found."
+        )
+
+    # ------------------------------------------------------------------
+    # Simulate
+    # ------------------------------------------------------------------
+
     def on_simulate(self) -> None:
         model = self.scene.to_model()
         model["board"] = self.board
         model["step_ms"] = self.step_ms
+
+        # Always clear previous error state first.
+        self._clear_validation_errors()
+
+        # Validate all block parameters before touching the simulator.
+        errors = validate_model(model, WORKSPACE)
+        if errors:
+            self._show_validation_errors(errors)
+            return
+
         duration = self.sim_scope_tab.duration_spin.value()
         try:
             t, sigs = simulate_model(model, duration_s=duration,
