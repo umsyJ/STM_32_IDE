@@ -657,15 +657,19 @@ _STARTUP_LIBS: List[Tuple[str, str, str, str]] = [
 
 
 class _StartupImportWorker(QThread):
-    """Background thread: imports startup libs, pip-installs any that are missing.
+    """Background thread: upgrades all startup libs via pip then imports them.
+
+    Every time the IDE opens, each package is upgraded to the latest available
+    version.  If a package is not yet installed it is installed first.  If the
+    upgrade fails (e.g. no internet) the existing installed version is used.
 
     Signals
     -------
     line(str)
         Each log line to append to the command window (thread-safe via Qt).
     done(dict)
-        Emitted once when all imports are attempted.  The dict maps alias
-        → module object for every successfully imported library.
+        Emitted once when all packages are processed.  Maps alias → module
+        for every successfully imported library.
     """
 
     line = pyqtSignal(str)
@@ -675,45 +679,31 @@ class _StartupImportWorker(QThread):
         imported: Dict[str, object] = {}
 
         for mod_path, alias, pkg, friendly in _STARTUP_LIBS:
-            # ---- first attempt -------------------------------------------
-            try:
-                mod = importlib.import_module(mod_path)
-                ver = getattr(mod, "__version__", "")
-                ver_str = f" {ver}" if ver else ""
-                self.line.emit(f"%   [ok]  {friendly}{ver_str}  →  {alias}")
-                imported[alias] = mod
-                continue
-            except ImportError:
-                pass
-
-            # ---- not installed: try pip -----------------------------------
-            self.line.emit(f"%   [--]  {friendly} not found — installing {pkg} ...")
+            # ---- always upgrade (installs if missing, upgrades if present) --
             try:
                 proc = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--quiet", pkg],
+                    [sys.executable, "-m", "pip", "install",
+                     "--upgrade", "--quiet", pkg],
                     capture_output=True, text=True, timeout=300,
                 )
                 if proc.returncode != 0:
                     tail = (proc.stderr.strip().splitlines() or [""])[-1]
-                    self.line.emit(f"%   [!!]  pip install {pkg} failed: {tail}")
-                    continue
+                    self.line.emit(
+                        f"%   [!!]  pip upgrade {pkg} failed: {tail}"
+                    )
+                    # Fall through — import whatever version is already installed
             except Exception as exc:
                 self.line.emit(f"%   [!!]  Could not run pip: {exc}")
-                continue
 
-            # ---- retry after install -------------------------------------
+            # ---- import (picks up the just-upgraded version) ----------------
             try:
                 mod = importlib.import_module(mod_path)
                 ver = getattr(mod, "__version__", "")
                 ver_str = f" {ver}" if ver else ""
-                self.line.emit(
-                    f"%   [ok]  {friendly}{ver_str} installed  →  {alias}"
-                )
+                self.line.emit(f"%   [ok]  {friendly}{ver_str}  ->  {alias}")
                 imported[alias] = mod
             except ImportError as exc:
-                self.line.emit(
-                    f"%   [!!]  Installed {pkg} but import still failed: {exc}"
-                )
+                self.line.emit(f"%   [!!]  {friendly} unavailable: {exc}")
 
         self.done.emit(imported)
 
@@ -818,7 +808,7 @@ class MatlabWorkspace(QWidget):
 
     def _start_startup_imports(self) -> None:
         self.command.output.appendPlainText(
-            "\n% ── Startup imports ─────────────────────────────────────"
+            "\n% -- Startup imports (upgrading to latest) ---------------"
         )
         self._startup_worker = _StartupImportWorker()
         self._startup_worker.line.connect(self.command.output.appendPlainText)
@@ -833,7 +823,7 @@ class MatlabWorkspace(QWidget):
         n_all = len(_STARTUP_LIBS)
         status = "all OK" if n_ok == n_all else f"{n_ok}/{n_all} succeeded"
         self.command.output.appendPlainText(
-            f"% ── {status} ─────────────────────────────────────────────"
+            f"% -- {status} " + "-" * max(0, 47 - len(status))
         )
         self.command.output.moveCursor(QTextCursor.End)
 
