@@ -1524,12 +1524,23 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    # Originally 8 blocks; extended to 13 with ToWorkspace, Step, Integrator,
-    # TransferFcn and PID.
+    # Extended to 36 blocks including all new group A-F blocks.
     expected = {
         "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
         "Sum", "Product", "Constant",
         "ToWorkspace", "Step", "Integrator", "TransferFcn", "PID",
+        # Group A Sources
+        "SineWave", "Ramp", "Clock", "PulseGenerator",
+        # Group B Math
+        "Gain", "Abs", "Sign", "Sqrt", "Saturation", "DeadZone", "MinMax",
+        # Group C Logic
+        "RelationalOperator", "LogicalOperator", "Switch",
+        # Group D Discrete
+        "UnitDelay", "DiscreteIntegrator", "ZeroOrderHold", "Derivative",
+        # Group E Lookup
+        "Lookup1D",
+        # Group F STM32 HAL
+        "ADC", "DAC", "PWMOut", "TimerTick",
     }
     assert set(BLOCK_CATALOG.keys()) == expected
 
@@ -2994,6 +3005,1096 @@ def test_validate_full_model_all_good_no_errors():
     )
     errs = validate_model(model)
     assert errs == [], f"Unexpected errors: {errs}"
+
+
+# ---------------------------------------------------------------------------
+# Factory helpers for new blocks (Groups A-F)
+# ---------------------------------------------------------------------------
+
+
+def _sine(bid="SN", frequency_hz="1.0", amplitude="1.0", phase_deg="0.0", offset="0.0"):
+    return {"type": "SineWave", "id": bid, "x": 0, "y": 0,
+            "params": {"frequency_hz": frequency_hz, "amplitude": amplitude,
+                       "phase_deg": phase_deg, "offset": offset}}
+
+def _ramp(bid="RM", slope="1.0", start_time="0.0", initial_output="0.0"):
+    return {"type": "Ramp", "id": bid, "x": 0, "y": 0,
+            "params": {"slope": slope, "start_time": start_time, "initial_output": initial_output}}
+
+def _clock(bid="CK"):
+    return {"type": "Clock", "id": bid, "x": 0, "y": 0, "params": {}}
+
+def _pulse(bid="PG", amplitude="1.0", period="1.0", pulse_width="50", phase_delay="0.0"):
+    return {"type": "PulseGenerator", "id": bid, "x": 0, "y": 0,
+            "params": {"amplitude": amplitude, "period": period,
+                       "pulse_width": pulse_width, "phase_delay": phase_delay}}
+
+def _gain(bid="GN", gain="2.0"):
+    return {"type": "Gain", "id": bid, "x": 0, "y": 0, "params": {"gain": gain}}
+
+def _abs(bid="AB"):
+    return {"type": "Abs", "id": bid, "x": 0, "y": 0, "params": {}}
+
+def _sign(bid="SG"):
+    return {"type": "Sign", "id": bid, "x": 0, "y": 0, "params": {}}
+
+def _sqrt(bid="SQ", mode="sqrt"):
+    return {"type": "Sqrt", "id": bid, "x": 0, "y": 0, "params": {"mode": mode}}
+
+def _saturation(bid="SAT", upper_limit="1.0", lower_limit="-1.0"):
+    return {"type": "Saturation", "id": bid, "x": 0, "y": 0,
+            "params": {"upper_limit": upper_limit, "lower_limit": lower_limit}}
+
+def _deadzone(bid="DZ", lower_value="-0.5", upper_value="0.5"):
+    return {"type": "DeadZone", "id": bid, "x": 0, "y": 0,
+            "params": {"lower_value": lower_value, "upper_value": upper_value}}
+
+def _minmax(bid="MM", function="min"):
+    return {"type": "MinMax", "id": bid, "x": 0, "y": 0, "params": {"function": function}}
+
+def _relop(bid="RO", operator=">"):
+    return {"type": "RelationalOperator", "id": bid, "x": 0, "y": 0,
+            "params": {"operator": operator}}
+
+def _logop(bid="LO", operator="AND"):
+    return {"type": "LogicalOperator", "id": bid, "x": 0, "y": 0,
+            "params": {"operator": operator}}
+
+def _switch(bid="SW2", threshold="0.5", criteria=">="):
+    return {"type": "Switch", "id": bid, "x": 0, "y": 0,
+            "params": {"threshold": threshold, "criteria": criteria}}
+
+def _unitdelay(bid="UD", initial_condition="0.0"):
+    return {"type": "UnitDelay", "id": bid, "x": 0, "y": 0,
+            "params": {"initial_condition": initial_condition}}
+
+def _discint(bid="DI", gain_value="1.0", initial_condition="0.0",
+             upper_limit="1e10", lower_limit="-1e10", method="Forward Euler"):
+    return {"type": "DiscreteIntegrator", "id": bid, "x": 0, "y": 0,
+            "params": {"gain_value": gain_value, "initial_condition": initial_condition,
+                       "upper_limit": upper_limit, "lower_limit": lower_limit,
+                       "method": method}}
+
+def _zoh(bid="ZH", sample_time="0.01"):
+    return {"type": "ZeroOrderHold", "id": bid, "x": 0, "y": 0,
+            "params": {"sample_time": sample_time}}
+
+def _deriv(bid="DV", initial_condition="0.0"):
+    return {"type": "Derivative", "id": bid, "x": 0, "y": 0,
+            "params": {"initial_condition": initial_condition}}
+
+def _lookup1d(bid="LU", breakpoints="0 1", table_data="0 1", extrapolation="clip"):
+    return {"type": "Lookup1D", "id": bid, "x": 0, "y": 0,
+            "params": {"breakpoints": breakpoints, "table_data": table_data,
+                       "extrapolation": extrapolation}}
+
+def _adc(bid="AD", channel="1", resolution="12", vref="3.3", sim_value="1.5"):
+    return {"type": "ADC", "id": bid, "x": 0, "y": 0,
+            "params": {"channel": channel, "resolution": resolution,
+                       "vref": vref, "sim_value": sim_value}}
+
+def _dac(bid="DC", channel="1", vref="3.3"):
+    return {"type": "DAC", "id": bid, "x": 0, "y": 0,
+            "params": {"channel": channel, "vref": vref}}
+
+def _pwmout(bid="PW", timer="TIM2", channel="1", frequency_hz="1000", max_duty="100.0"):
+    return {"type": "PWMOut", "id": bid, "x": 0, "y": 0,
+            "params": {"timer": timer, "channel": channel,
+                       "frequency_hz": frequency_hz, "max_duty": max_duty}}
+
+def _timertick(bid="TT", scale="0.001"):
+    return {"type": "TimerTick", "id": bid, "x": 0, "y": 0,
+            "params": {"scale": scale}}
+
+
+# ---------------------------------------------------------------------------
+# 34. SineWave block
+# ---------------------------------------------------------------------------
+
+
+def test_sinewave_in_catalog():
+    assert "SineWave" in BLOCK_CATALOG
+
+def test_sinewave_spec_has_no_inputs_one_output():
+    spec = BLOCK_CATALOG["SineWave"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+def test_sinewave_spec_has_required_params():
+    params = BLOCK_CATALOG["SineWave"].params
+    for k in ("frequency_hz", "amplitude", "phase_deg", "offset"):
+        assert k in params
+
+def test_sinewave_color_is_dark_blue():
+    assert BLOCK_CATALOG["SineWave"].color == "#1a5276"
+
+def test_simulate_sinewave_zero_phase_zero_offset():
+    model = _model([_sine("SN", frequency_hz="1.0", amplitude="2.0"), _scope("SC")],
+                   [_wire("SN", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # mean of full cycle sine should be ~0
+    assert abs(float(y.mean())) < 0.05
+    # amplitude should be ~2
+    assert abs(float(y.max()) - 2.0) < 0.05
+
+def test_simulate_sinewave_dc_offset():
+    model = _model([_sine("SN", amplitude="1.0", offset="3.0"), _scope("SC")],
+                   [_wire("SN", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 3.0) < 0.05
+
+def test_simulate_sinewave_phase_180_inverts():
+    model_0   = _model([_sine("SN", phase_deg="0.0"),   _scope("SC")], [_wire("SN", "y", "SC", "u0")])
+    model_180 = _model([_sine("SN", phase_deg="180.0"), _scope("SC")], [_wire("SN", "y", "SC", "u0")])
+    _, s0   = simulate_model(model_0,   duration_s=0.5, step_s=0.001)
+    _, s180 = simulate_model(model_180, duration_s=0.5, step_s=0.001)
+    assert abs(float(s0["SC.u0"][0]) + float(s180["SC.u0"][0])) < 0.01
+
+def test_emit_decls_sinewave():
+    d = _emit_decls([_sine("SN")])
+    assert "sig_SN_y" in d
+
+def test_emit_step_sinewave_has_sinf():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_sine("SN")], {}, FakeWorkspace(), 1, board)
+    assert "sinf" in step
+    assert "sig_SN_y" in step
+
+def test_validate_sinewave_zero_frequency_error():
+    errs = validate_model(_model([_sine("SN", frequency_hz="0")]))
+    assert any(e.param == "frequency_hz" and e.code == "E002" for e in errs)
+
+def test_validate_sinewave_valid_passes():
+    assert validate_model(_model([_sine("SN")])) == []
+
+def test_topo_order_sinewave_before_scope():
+    model = _model([_scope("SC"), _sine("SN")], [_wire("SN", "y", "SC", "u0")])
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("SN") < ids.index("SC")
+
+
+# ---------------------------------------------------------------------------
+# 35. Ramp block
+# ---------------------------------------------------------------------------
+
+
+def test_ramp_in_catalog():
+    assert "Ramp" in BLOCK_CATALOG
+
+def test_ramp_spec_has_no_inputs_one_output():
+    spec = BLOCK_CATALOG["Ramp"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+def test_simulate_ramp_starts_at_zero():
+    model = _model([_ramp("RM", slope="1.0", start_time="0.0", initial_output="0.0"), _scope("SC")],
+                   [_wire("RM", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y[0])) < 1e-9
+
+def test_simulate_ramp_slope():
+    model = _model([_ramp("RM", slope="2.0"), _scope("SC")], [_wire("RM", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # y[-1] ≈ 2 * 0.999
+    assert abs(float(y[-1]) - 2.0 * float(t[-1])) < 0.01
+
+def test_simulate_ramp_delay():
+    model = _model([_ramp("RM", slope="1.0", start_time="0.5", initial_output="0.0"), _scope("SC")],
+                   [_wire("RM", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y[t < 0.5].max()) < 1e-9  # before start_time → 0
+
+def test_emit_decls_ramp():
+    d = _emit_decls([_ramp("RM")])
+    assert "sig_RM_y" in d
+
+def test_emit_step_ramp_has_counter():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_ramp("RM")], {}, FakeWorkspace(), 1, board)
+    assert "sig_RM_y" in step
+    assert "_cnt_RM" in step
+
+def test_validate_ramp_negative_start_time():
+    errs = validate_model(_model([_ramp("RM", start_time="-1")]))
+    assert any(e.param == "start_time" and e.code == "E002" for e in errs)
+
+def test_validate_ramp_valid():
+    assert validate_model(_model([_ramp("RM")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 36. Clock block
+# ---------------------------------------------------------------------------
+
+
+def test_clock_in_catalog():
+    assert "Clock" in BLOCK_CATALOG
+
+def test_clock_spec_no_params():
+    assert BLOCK_CATALOG["Clock"].params == {}
+
+def test_simulate_clock_outputs_time():
+    model = _model([_clock("CK"), _scope("SC")], [_wire("CK", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y[0])) < 1e-9
+    assert abs(float(y[-1]) - float(t[-1])) < 0.001
+
+def test_emit_decls_clock():
+    d = _emit_decls([_clock("CK")])
+    assert "sig_CK_y" in d
+
+def test_emit_step_clock_has_counter():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_clock("CK")], {}, FakeWorkspace(), 1, board)
+    assert "sig_CK_y" in step
+    assert "_cnt_CK" in step
+
+def test_validate_clock_no_errors():
+    assert validate_model(_model([_clock("CK")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 37. PulseGenerator block
+# ---------------------------------------------------------------------------
+
+
+def test_pulse_in_catalog():
+    assert "PulseGenerator" in BLOCK_CATALOG
+
+def test_pulse_spec_has_four_params():
+    params = BLOCK_CATALOG["PulseGenerator"].params
+    for k in ("amplitude", "period", "pulse_width", "phase_delay"):
+        assert k in params
+
+def test_simulate_pulse_50pct():
+    model = _model([_pulse("PG", amplitude="1.0", period="1.0", pulse_width="50"), _scope("SC")],
+                   [_wire("PG", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=2.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 0.5) < 0.05
+
+def test_simulate_pulse_zero_before_delay():
+    model = _model([_pulse("PG", phase_delay="0.5"), _scope("SC")],
+                   [_wire("PG", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y[t < 0.5].sum()) == 0.0
+
+def test_emit_decls_pulse():
+    d = _emit_decls([_pulse("PG")])
+    assert "sig_PG_y" in d
+
+def test_emit_step_pulse_has_fmodf():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_pulse("PG")], {}, FakeWorkspace(), 1, board)
+    assert "fmodf" in step
+    assert "sig_PG_y" in step
+
+def test_validate_pulse_zero_period():
+    errs = validate_model(_model([_pulse("PG", period="0")]))
+    assert any(e.param == "period" and e.code == "E002" for e in errs)
+
+def test_validate_pulse_width_out_of_range():
+    errs = validate_model(_model([_pulse("PG", pulse_width="150")]))
+    assert any(e.param == "pulse_width" and e.code == "E002" for e in errs)
+
+def test_validate_pulse_valid():
+    assert validate_model(_model([_pulse("PG")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 38. Gain block
+# ---------------------------------------------------------------------------
+
+
+def test_gain_in_catalog():
+    assert "Gain" in BLOCK_CATALOG
+
+def test_gain_spec_one_in_one_out():
+    spec = BLOCK_CATALOG["Gain"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert [p.name for p in spec.outputs] == ["y"]
+
+def test_simulate_gain_doubles_input():
+    model = _model([_sw("A", amplitude="3.0", duty="1.0"), _gain("GN", gain="2.0"), _scope("SC")],
+                   [_wire("A", "y", "GN", "u"), _wire("GN", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 6.0) < 1e-6
+
+def test_emit_decls_gain():
+    d = _emit_decls([_gain("GN")])
+    assert "sig_GN_y" in d
+
+def test_emit_step_gain():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _gain("GN", gain="5.0")]
+    wires = {("GN", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_GN_y" in step
+    assert "5.0" in step
+
+def test_validate_gain_non_numeric():
+    errs = validate_model(_model([_gain("GN", gain="big")]))
+    assert any(e.param == "gain" and e.code == "E001" for e in errs)
+
+def test_validate_gain_valid():
+    assert validate_model(_model([_gain("GN", gain="0.5")])) == []
+
+def test_topo_order_gain_after_source():
+    model = _model([_gain("GN"), _sw("A")], [_wire("A", "y", "GN", "u")])
+    ids = [b["id"] for b in _topo_order(model)]
+    assert ids.index("A") < ids.index("GN")
+
+
+# ---------------------------------------------------------------------------
+# 39. Abs block
+# ---------------------------------------------------------------------------
+
+
+def test_abs_in_catalog():
+    assert "Abs" in BLOCK_CATALOG
+
+def test_simulate_abs_removes_negatives():
+    model = _model([_sw("A", amplitude="-2.0", duty="1.0"), _abs("AB"), _scope("SC")],
+                   [_wire("A", "y", "AB", "u"), _wire("AB", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.min()) >= 0.0
+    assert abs(float(y.mean()) - 2.0) < 1e-6
+
+def test_emit_decls_abs():
+    d = _emit_decls([_abs("AB")])
+    assert "sig_AB_y" in d
+
+def test_emit_step_abs_uses_fabsf():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _abs("AB")]
+    wires = {("AB", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "fabsf" in step
+    assert "sig_AB_y" in step
+
+def test_validate_abs_no_params():
+    assert validate_model(_model([_abs("AB")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 40. Sign block
+# ---------------------------------------------------------------------------
+
+
+def test_sign_in_catalog():
+    assert "Sign" in BLOCK_CATALOG
+
+def test_simulate_sign_positive():
+    model = _model([_sw("A", amplitude="5.0", duty="1.0"), _sign("SG"), _scope("SC")],
+                   [_wire("A", "y", "SG", "u"), _wire("SG", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_emit_step_sign_has_ternary():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sign("SG")]
+    wires = {("SG", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_SG_y" in step
+    assert "1.0f" in step
+    assert "-1.0f" in step
+
+def test_validate_sign_no_params():
+    assert validate_model(_model([_sign("SG")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 41. Sqrt block
+# ---------------------------------------------------------------------------
+
+
+def test_sqrt_in_catalog():
+    assert "Sqrt" in BLOCK_CATALOG
+
+def test_simulate_sqrt_basic():
+    model = _model([_sw("A", amplitude="4.0", duty="1.0"), _sqrt("SQ"), _scope("SC")],
+                   [_wire("A", "y", "SQ", "u"), _wire("SQ", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 2.0) < 1e-6
+
+def test_simulate_sqrt_signed():
+    # signed_sqrt of -4 should be -2
+    model = _model([_sw("A", amplitude="-4.0", duty="1.0"), _sqrt("SQ", mode="signed_sqrt"), _scope("SC")],
+                   [_wire("A", "y", "SQ", "u"), _wire("SQ", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - (-2.0)) < 1e-6
+
+def test_emit_step_sqrt_uses_sqrtf():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sqrt("SQ")]
+    wires = {("SQ", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sqrtf" in step
+
+def test_validate_sqrt_invalid_mode():
+    errs = validate_model(_model([_sqrt("SQ", mode="cube")]))
+    assert any(e.param == "mode" and e.code == "E003" for e in errs)
+
+def test_validate_sqrt_valid():
+    assert validate_model(_model([_sqrt("SQ", mode="sqrt")])) == []
+    assert validate_model(_model([_sqrt("SQ", mode="signed_sqrt")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 42. Saturation block
+# ---------------------------------------------------------------------------
+
+
+def test_saturation_in_catalog():
+    assert "Saturation" in BLOCK_CATALOG
+
+def test_simulate_saturation_clips():
+    model = _model([_sw("A", amplitude="5.0", duty="1.0"),
+                    _saturation("SAT", upper_limit="2.0", lower_limit="-2.0"),
+                    _scope("SC")],
+                   [_wire("A", "y", "SAT", "u"), _wire("SAT", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y.max()) <= 2.0 + 1e-9
+    assert float(y.min()) >= -2.0 - 1e-9
+
+def test_emit_decls_saturation():
+    d = _emit_decls([_saturation("SAT")])
+    assert "sig_SAT_y" in d
+
+def test_emit_step_saturation():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _saturation("SAT")]
+    wires = {("SAT", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_SAT_y" in step
+
+def test_validate_saturation_upper_le_lower():
+    errs = validate_model(_model([_saturation("SAT", upper_limit="-1", lower_limit="1")]))
+    assert any(e.code == "E007" for e in errs)
+
+def test_validate_saturation_valid():
+    assert validate_model(_model([_saturation("SAT")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 43. DeadZone block
+# ---------------------------------------------------------------------------
+
+
+def test_deadzone_in_catalog():
+    assert "DeadZone" in BLOCK_CATALOG
+
+def test_simulate_deadzone_inside_zone_is_zero():
+    model = _model([_sw("A", amplitude="0.3", duty="1.0"),
+                    _deadzone("DZ", lower_value="-0.5", upper_value="0.5"),
+                    _scope("SC")],
+                   [_wire("A", "y", "DZ", "u"), _wire("DZ", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean())) < 1e-9
+
+def test_simulate_deadzone_outside_zone():
+    model = _model([_sw("A", amplitude="2.0", duty="1.0"),
+                    _deadzone("DZ", lower_value="-0.5", upper_value="0.5"),
+                    _scope("SC")],
+                   [_wire("A", "y", "DZ", "u"), _wire("DZ", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 1.5) < 1e-6  # 2.0 - 0.5 = 1.5
+
+def test_emit_step_deadzone():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _deadzone("DZ")]
+    wires = {("DZ", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_DZ_y" in step
+
+def test_validate_deadzone_upper_less_than_lower():
+    errs = validate_model(_model([_deadzone("DZ", upper_value="-1.0", lower_value="1.0")]))
+    assert any(e.code == "E007" for e in errs)
+
+def test_validate_deadzone_valid():
+    assert validate_model(_model([_deadzone("DZ")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 44. MinMax block
+# ---------------------------------------------------------------------------
+
+
+def test_minmax_in_catalog():
+    assert "MinMax" in BLOCK_CATALOG
+
+def test_minmax_spec_two_inputs():
+    spec = BLOCK_CATALOG["MinMax"]
+    assert [p.name for p in spec.inputs] == ["u0", "u1"]
+
+def test_simulate_minmax_min():
+    model = _model([_sw("A", amplitude="3.0", duty="1.0"),
+                    _sw("B", amplitude="1.0", duty="1.0"),
+                    _minmax("MM", function="min"), _scope("SC")],
+                   [_wire("A", "y", "MM", "u0"), _wire("B", "y", "MM", "u1"),
+                    _wire("MM", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_simulate_minmax_max():
+    model = _model([_sw("A", amplitude="3.0", duty="1.0"),
+                    _sw("B", amplitude="1.0", duty="1.0"),
+                    _minmax("MM", function="max"), _scope("SC")],
+                   [_wire("A", "y", "MM", "u0"), _wire("B", "y", "MM", "u1"),
+                    _wire("MM", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 3.0) < 1e-6
+
+def test_emit_step_minmax_uses_fminf():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _minmax("MM")]
+    wires = {("MM", "u0"): ("A", "y"), ("MM", "u1"): ("B", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "fminf" in step or "fmaxf" in step
+
+def test_validate_minmax_invalid_function():
+    errs = validate_model(_model([_minmax("MM", function="average")]))
+    assert any(e.param == "function" and e.code == "E003" for e in errs)
+
+def test_validate_minmax_valid():
+    assert validate_model(_model([_minmax("MM", function="min")])) == []
+    assert validate_model(_model([_minmax("MM", function="max")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 45. RelationalOperator block
+# ---------------------------------------------------------------------------
+
+
+def test_relop_in_catalog():
+    assert "RelationalOperator" in BLOCK_CATALOG
+
+def test_simulate_relop_gt_true():
+    model = _model([_sw("A", amplitude="3.0", duty="1.0"),
+                    _sw("B", amplitude="1.0", duty="1.0"),
+                    _relop("RO", operator=">"), _scope("SC")],
+                   [_wire("A", "y", "RO", "u0"), _wire("B", "y", "RO", "u1"),
+                    _wire("RO", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_simulate_relop_eq():
+    model = _model([_sw("A", amplitude="2.0", duty="1.0"),
+                    _sw("B", amplitude="2.0", duty="1.0"),
+                    _relop("RO", operator="=="), _scope("SC")],
+                   [_wire("A", "y", "RO", "u0"), _wire("B", "y", "RO", "u1"),
+                    _wire("RO", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_emit_step_relop():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _relop("RO")]
+    wires = {("RO", "u0"): ("A", "y"), ("RO", "u1"): ("B", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_RO_y" in step
+    assert "1.0f" in step
+
+def test_validate_relop_invalid_operator():
+    errs = validate_model(_model([_relop("RO", operator="<>")]))
+    assert any(e.param == "operator" and e.code == "E003" for e in errs)
+
+def test_validate_relop_valid():
+    for op in (">", "<", ">=", "<=", "==", "!="):
+        assert validate_model(_model([_relop("RO", operator=op)])) == [], f"op={op}"
+
+
+# ---------------------------------------------------------------------------
+# 46. LogicalOperator block
+# ---------------------------------------------------------------------------
+
+
+def test_logop_in_catalog():
+    assert "LogicalOperator" in BLOCK_CATALOG
+
+def test_simulate_logop_and():
+    model = _model([_sw("A", amplitude="1.0", duty="1.0"),
+                    _sw("B", amplitude="1.0", duty="1.0"),
+                    _logop("LO", operator="AND"), _scope("SC")],
+                   [_wire("A", "y", "LO", "u0"), _wire("B", "y", "LO", "u1"),
+                    _wire("LO", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_simulate_logop_or_one_true():
+    model = _model([_sw("A", amplitude="1.0", duty="1.0"),
+                    _sw("B", amplitude="0.0", duty="1.0"),
+                    _logop("LO", operator="OR"), _scope("SC")],
+                   [_wire("A", "y", "LO", "u0"), _wire("B", "y", "LO", "u1"),
+                    _wire("LO", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_simulate_logop_not():
+    model = _model([_sw("A", amplitude="0.0", duty="1.0"),
+                    _logop("LO", operator="NOT"), _scope("SC")],
+                   [_wire("A", "y", "LO", "u0"), _wire("LO", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.0) < 1e-6
+
+def test_emit_step_logop_and():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _logop("LO")]
+    wires = {("LO", "u0"): ("A", "y"), ("LO", "u1"): ("B", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_LO_y" in step
+
+def test_validate_logop_invalid_operator():
+    errs = validate_model(_model([_logop("LO", operator="XNOR")]))
+    assert any(e.param == "operator" and e.code == "E003" for e in errs)
+
+def test_validate_logop_valid():
+    for op in ("AND", "OR", "NOT", "NAND", "NOR", "XOR"):
+        assert validate_model(_model([_logop("LO", operator=op)])) == [], f"op={op}"
+
+
+# ---------------------------------------------------------------------------
+# 47. Switch block
+# ---------------------------------------------------------------------------
+
+
+def test_switch_in_catalog():
+    assert "Switch" in BLOCK_CATALOG
+
+def test_switch_spec_three_inputs():
+    spec = BLOCK_CATALOG["Switch"]
+    assert [p.name for p in spec.inputs] == ["u0", "u1", "u2"]
+
+def test_simulate_switch_selects_u0():
+    # u1 = 1.0 >= threshold 0.5 → select u0
+    model = _model([_sw("A", amplitude="10.0", duty="1.0"),
+                    _sw("B", amplitude="1.0",  duty="1.0"),
+                    _sw("C", amplitude="99.0", duty="1.0"),
+                    _switch("SW2", threshold="0.5", criteria=">="), _scope("SC")],
+                   [_wire("A", "y", "SW2", "u0"), _wire("B", "y", "SW2", "u1"),
+                    _wire("C", "y", "SW2", "u2"), _wire("SW2", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 10.0) < 1e-6
+
+def test_simulate_switch_selects_u2():
+    # u1 = 0.0 < threshold 0.5 → select u2
+    model = _model([_sw("A", amplitude="10.0", duty="1.0"),
+                    _sw("B", amplitude="0.0",  duty="1.0"),
+                    _sw("C", amplitude="99.0", duty="1.0"),
+                    _switch("SW2", threshold="0.5"), _scope("SC")],
+                   [_wire("A", "y", "SW2", "u0"), _wire("B", "y", "SW2", "u1"),
+                    _wire("C", "y", "SW2", "u2"), _wire("SW2", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 99.0) < 1e-6
+
+def test_emit_step_switch():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _sw("B"), _sw("C"), _switch("SW2")]
+    wires = {("SW2", "u0"): ("A", "y"), ("SW2", "u1"): ("B", "y"), ("SW2", "u2"): ("C", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_SW2_y" in step
+
+def test_validate_switch_invalid_criteria():
+    errs = validate_model(_model([_switch("SW2", criteria="!=")]))
+    assert any(e.param == "criteria" and e.code == "E003" for e in errs)
+
+def test_validate_switch_valid():
+    assert validate_model(_model([_switch("SW2")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 48. UnitDelay block
+# ---------------------------------------------------------------------------
+
+
+def test_unitdelay_in_catalog():
+    assert "UnitDelay" in BLOCK_CATALOG
+
+def test_simulate_unitdelay_delays_by_one():
+    # Input is ramp 0, 1, 2... → output should be 0, 0, 1, 2...
+    model = _model([_const("K", value="1.0"), _unitdelay("UD"), _scope("SC")],
+                   [_wire("K", "y", "UD", "u"), _wire("UD", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.01, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert float(y[0]) == 0.0  # first output is IC
+
+def test_emit_decls_unitdelay_has_state():
+    d = _emit_decls([_unitdelay("UD")])
+    assert "sig_UD_y" in d
+    assert "_state_UD" in d
+
+def test_emit_step_unitdelay():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _unitdelay("UD")]
+    wires = {("UD", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_UD_y" in step
+    assert "_state_UD" in step
+
+def test_validate_unitdelay_valid():
+    assert validate_model(_model([_unitdelay("UD")])) == []
+
+def test_validate_unitdelay_invalid_ic():
+    errs = validate_model(_model([_unitdelay("UD", initial_condition="abc")]))
+    assert any(e.param == "initial_condition" and e.code == "E001" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 49. DiscreteIntegrator block
+# ---------------------------------------------------------------------------
+
+
+def test_discint_in_catalog():
+    assert "DiscreteIntegrator" in BLOCK_CATALOG
+
+def test_simulate_discint_integrates():
+    model = _model([_sw("A", amplitude="1.0", duty="1.0"), _discint("DI"), _scope("SC")],
+                   [_wire("A", "y", "DI", "u"), _wire("DI", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y[-1]) - float(t[-1])) < 0.01
+
+def test_simulate_discint_upper_clamp():
+    model = _model([_sw("A", amplitude="10.0", duty="1.0"),
+                    _discint("DI", upper_limit="0.5"), _scope("SC")],
+                   [_wire("A", "y", "DI", "u"), _wire("DI", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    assert float(sigs["SC.u0"].max()) <= 0.5 + 1e-9
+
+def test_emit_decls_discint_has_state():
+    d = _emit_decls([_discint("DI")])
+    assert "sig_DI_y" in d
+    assert "_state_DI" in d
+
+def test_emit_step_discint():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _discint("DI")]
+    wires = {("DI", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_DI_y" in step
+    assert "_state_DI" in step
+
+def test_validate_discint_invalid_method():
+    errs = validate_model(_model([_discint("DI", method="RK4")]))
+    assert any(e.param == "method" and e.code == "E003" for e in errs)
+
+def test_validate_discint_limit_conflict():
+    errs = validate_model(_model([_discint("DI", upper_limit="-1", lower_limit="1")]))
+    assert any(e.code == "E007" for e in errs)
+
+def test_validate_discint_valid():
+    assert validate_model(_model([_discint("DI")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 50. ZeroOrderHold block
+# ---------------------------------------------------------------------------
+
+
+def test_zoh_in_catalog():
+    assert "ZeroOrderHold" in BLOCK_CATALOG
+
+def test_simulate_zoh_holds_value():
+    model = _model([_sw("A", frequency_hz="10.0"), _zoh("ZH", sample_time="0.1"), _scope("SC")],
+                   [_wire("A", "y", "ZH", "u"), _wire("ZH", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["SC.u0"]
+    # The output should only change at 100ms intervals — check it's not changing every step
+    changes = np.sum(np.diff(y) != 0)
+    total = len(y) - 1
+    assert changes < total * 0.2  # fewer than 20% of steps should have a change
+
+def test_emit_decls_zoh_has_state():
+    d = _emit_decls([_zoh("ZH")])
+    assert "sig_ZH_y" in d
+    assert "_state_ZH" in d
+
+def test_emit_step_zoh():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _zoh("ZH")]
+    wires = {("ZH", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_ZH_y" in step
+    assert "_state_ZH" in step
+
+def test_validate_zoh_zero_sample_time():
+    errs = validate_model(_model([_zoh("ZH", sample_time="0")]))
+    assert any(e.param == "sample_time" and e.code == "E002" for e in errs)
+
+def test_validate_zoh_valid():
+    assert validate_model(_model([_zoh("ZH")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 51. Derivative block
+# ---------------------------------------------------------------------------
+
+
+def test_derivative_in_catalog():
+    assert "Derivative" in BLOCK_CATALOG
+
+def test_simulate_derivative_of_ramp_is_constant():
+    # derivative of ramp (slope=1) = 1/dt * dt = 1.0 (after first step)
+    model = _model([_ramp("RM", slope="1.0"), _deriv("DV"), _scope("SC")],
+                   [_wire("RM", "y", "DV", "u"), _wire("DV", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # after first sample, derivative should be ≈ 1.0
+    assert abs(float(y[1:].mean()) - 1.0) < 0.01
+
+def test_emit_decls_derivative_has_state():
+    d = _emit_decls([_deriv("DV")])
+    assert "sig_DV_y" in d
+    assert "_state_DV" in d
+
+def test_emit_step_derivative():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _deriv("DV")]
+    wires = {("DV", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_DV_y" in step
+    assert "_state_DV" in step
+
+def test_validate_derivative_valid():
+    assert validate_model(_model([_deriv("DV")])) == []
+
+def test_validate_derivative_invalid_ic():
+    errs = validate_model(_model([_deriv("DV", initial_condition="nan")]))
+    assert any(e.param == "initial_condition" and e.code == "E001" for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# 52. Lookup1D block
+# ---------------------------------------------------------------------------
+
+
+def test_lookup1d_in_catalog():
+    assert "Lookup1D" in BLOCK_CATALOG
+
+def test_simulate_lookup1d_interpolates():
+    model = _model([_sw("A", amplitude="0.5", duty="1.0"),
+                    _lookup1d("LU", breakpoints="0 1", table_data="0 10"), _scope("SC")],
+                   [_wire("A", "y", "LU", "u"), _wire("LU", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.mean()) - 5.0) < 0.1
+
+def test_simulate_lookup1d_clips_at_boundary():
+    model = _model([_sw("A", amplitude="5.0", duty="1.0"),
+                    _lookup1d("LU", breakpoints="0 1", table_data="0 10"), _scope("SC")],
+                   [_wire("A", "y", "LU", "u"), _wire("LU", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert abs(float(y.max()) - 10.0) < 1e-6  # clipped at upper boundary
+
+def test_emit_decls_lookup1d():
+    d = _emit_decls([_lookup1d("LU")])
+    assert "sig_LU_y" in d
+
+def test_emit_step_lookup1d_has_arrays():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _lookup1d("LU")]
+    wires = {("LU", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "sig_LU_y" in step
+    assert "_bp_LU" in step
+    assert "_td_LU" in step
+
+def test_validate_lookup1d_mismatched_lengths():
+    errs = validate_model(_model([_lookup1d("LU", breakpoints="0 1 2", table_data="0 1")]))
+    assert any(e.code == "E007" for e in errs)
+
+def test_validate_lookup1d_non_increasing_breakpoints():
+    errs = validate_model(_model([_lookup1d("LU", breakpoints="1 0", table_data="0 1")]))
+    assert any(e.param == "breakpoints" and e.code == "E002" for e in errs)
+
+def test_validate_lookup1d_invalid_extrapolation():
+    errs = validate_model(_model([_lookup1d("LU", extrapolation="nearest")]))
+    assert any(e.param == "extrapolation" and e.code == "E003" for e in errs)
+
+def test_validate_lookup1d_valid():
+    assert validate_model(_model([_lookup1d("LU")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 53. ADC block
+# ---------------------------------------------------------------------------
+
+
+def test_adc_in_catalog():
+    assert "ADC" in BLOCK_CATALOG
+
+def test_adc_spec_source_no_inputs():
+    spec = BLOCK_CATALOG["ADC"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+def test_simulate_adc_outputs_sim_value():
+    model = _model([_adc("AD", sim_value="1.65"), _scope("SC")],
+                   [_wire("AD", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert abs(float(sigs["SC.u0"].mean()) - 1.65) < 1e-6
+
+def test_emit_decls_adc():
+    d = _emit_decls([_adc("AD")])
+    assert "sig_AD_y" in d
+
+def test_emit_step_adc_has_hal_calls():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_adc("AD")], {}, FakeWorkspace(), 1, board)
+    assert "HAL_ADC_Start" in step
+    assert "sig_AD_y" in step
+
+def test_validate_adc_invalid_channel():
+    errs = validate_model(_model([_adc("AD", channel="17")]))
+    assert any(e.param == "channel" and e.code == "E002" for e in errs)
+
+def test_validate_adc_invalid_resolution():
+    errs = validate_model(_model([_adc("AD", resolution="11")]))
+    assert any(e.param == "resolution" and e.code == "E002" for e in errs)
+
+def test_validate_adc_zero_vref():
+    errs = validate_model(_model([_adc("AD", vref="0")]))
+    assert any(e.param == "vref" and e.code == "E002" for e in errs)
+
+def test_validate_adc_valid():
+    assert validate_model(_model([_adc("AD")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 54. DAC block
+# ---------------------------------------------------------------------------
+
+
+def test_dac_in_catalog():
+    assert "DAC" in BLOCK_CATALOG
+
+def test_dac_spec_sink_no_outputs():
+    spec = BLOCK_CATALOG["DAC"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert spec.outputs == []
+
+def test_emit_decls_dac_no_output_signal():
+    d = _emit_decls([_dac("DC")])
+    assert "sig_DC_y" not in d
+
+def test_emit_step_dac_has_hal_calls():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _dac("DC")]
+    wires = {("DC", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "HAL_DAC_SetValue" in step
+    assert "HAL_DAC_Start" in step
+
+def test_validate_dac_invalid_channel():
+    errs = validate_model(_model([_dac("DC", channel="3")]))
+    assert any(e.param == "channel" and e.code == "E002" for e in errs)
+
+def test_validate_dac_zero_vref():
+    errs = validate_model(_model([_dac("DC", vref="-1")]))
+    assert any(e.param == "vref" and e.code == "E002" for e in errs)
+
+def test_validate_dac_valid():
+    assert validate_model(_model([_dac("DC")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 55. PWMOut block
+# ---------------------------------------------------------------------------
+
+
+def test_pwmout_in_catalog():
+    assert "PWMOut" in BLOCK_CATALOG
+
+def test_pwmout_spec_sink_no_outputs():
+    spec = BLOCK_CATALOG["PWMOut"]
+    assert [p.name for p in spec.inputs] == ["u"]
+    assert spec.outputs == []
+
+def test_emit_decls_pwmout_no_output_signal():
+    d = _emit_decls([_pwmout("PW")])
+    assert "sig_PW_y" not in d
+
+def test_emit_step_pwmout_has_hal_calls():
+    board = BOARDS["NUCLEO-F446RE"]
+    blocks = [_sw("A"), _pwmout("PW")]
+    wires = {("PW", "u"): ("A", "y")}
+    step, _ = _emit_step(blocks, wires, FakeWorkspace(), 1, board)
+    assert "__HAL_TIM_SET_COMPARE" in step
+    assert "__HAL_TIM_GET_AUTORELOAD" in step
+
+def test_validate_pwmout_empty_timer():
+    errs = validate_model(_model([_pwmout("PW", timer="")]))
+    assert any(e.param == "timer" and e.code == "E003" for e in errs)
+
+def test_validate_pwmout_invalid_channel():
+    errs = validate_model(_model([_pwmout("PW", channel="5")]))
+    assert any(e.param == "channel" and e.code == "E002" for e in errs)
+
+def test_validate_pwmout_zero_frequency():
+    errs = validate_model(_model([_pwmout("PW", frequency_hz="0")]))
+    assert any(e.param == "frequency_hz" and e.code == "E002" for e in errs)
+
+def test_validate_pwmout_valid():
+    assert validate_model(_model([_pwmout("PW")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 56. TimerTick block
+# ---------------------------------------------------------------------------
+
+
+def test_timertick_in_catalog():
+    assert "TimerTick" in BLOCK_CATALOG
+
+def test_timertick_spec_source_no_inputs():
+    spec = BLOCK_CATALOG["TimerTick"]
+    assert spec.inputs == []
+    assert [p.name for p in spec.outputs] == ["y"]
+
+def test_simulate_timertick_outputs_scaled_time():
+    model = _model([_timertick("TT", scale="0.001"), _scope("SC")],
+                   [_wire("TT", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # scale=0.001: y = t * 1000 * 0.001 = t
+    assert abs(float(y[-1]) - float(t[-1])) < 0.01
+
+def test_emit_decls_timertick():
+    d = _emit_decls([_timertick("TT")])
+    assert "sig_TT_y" in d
+
+def test_emit_step_timertick_has_gettick():
+    board = BOARDS["NUCLEO-F446RE"]
+    step, _ = _emit_step([_timertick("TT")], {}, FakeWorkspace(), 1, board)
+    assert "HAL_GetTick" in step
+    assert "sig_TT_y" in step
+
+def test_validate_timertick_zero_scale():
+    errs = validate_model(_model([_timertick("TT", scale="0")]))
+    assert any(e.param == "scale" and e.code == "E002" for e in errs)
+
+def test_validate_timertick_invalid_scale():
+    errs = validate_model(_model([_timertick("TT", scale="abc")]))
+    assert any(e.param == "scale" and e.code == "E001" for e in errs)
+
+def test_validate_timertick_valid():
+    assert validate_model(_model([_timertick("TT")])) == []
+
+def test_validate_timertick_negative_scale_valid():
+    # Negative scale is allowed (just != 0)
+    assert validate_model(_model([_timertick("TT", scale="-0.001")])) == []
 
 
 # ---------------------------------------------------------------------------

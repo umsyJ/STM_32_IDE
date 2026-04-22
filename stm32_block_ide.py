@@ -316,6 +316,361 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "sink, analogous to Simulink's To Workspace block."
         ),
     ),
+
+    # ---- Group A: Sources --------------------------------------------------
+
+    "SineWave": BlockSpec(
+        type_name="SineWave",
+        display_name="Sine Wave",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "frequency_hz": ("1.0",  "Frequency in Hz"),
+            "amplitude":    ("1.0",  "Peak amplitude"),
+            "phase_deg":    ("0.0",  "Phase offset in degrees"),
+            "offset":       ("0.0",  "DC offset added to output"),
+        },
+        description=(
+            "Generates A*sin(2*pi*f*t + phi) + offset. "
+            "Phase is specified in degrees. "
+            "Frequency must be > 0 Hz."
+        ),
+    ),
+
+    "Ramp": BlockSpec(
+        type_name="Ramp",
+        display_name="Ramp",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "slope":          ("1.0", "Rate of change (units/second)"),
+            "start_time":     ("0.0", "Time at which ramp begins (s)"),
+            "initial_output": ("0.0", "Output before and at start_time"),
+        },
+        description=(
+            "Outputs initial_output while t < start_time, then "
+            "initial_output + slope*(t - start_time) after. "
+            "Equivalent to Simulink's Ramp source block."
+        ),
+    ),
+
+    "Clock": BlockSpec(
+        type_name="Clock",
+        display_name="Clock",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Outputs the current simulation time t in seconds. "
+            "On the MCU, time is tracked by counting model steps multiplied "
+            "by the step period."
+        ),
+    ),
+
+    "PulseGenerator": BlockSpec(
+        type_name="PulseGenerator",
+        display_name="Pulse Generator",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "amplitude":   ("1.0",  "High-level output value"),
+            "period":      ("1.0",  "Pulse period in seconds (> 0)"),
+            "pulse_width": ("50",   "Pulse width as % of period (0-100)"),
+            "phase_delay": ("0.0",  "Delay before first pulse (s)"),
+        },
+        description=(
+            "Generates a periodic rectangular pulse. "
+            "pulse_width is a percentage of the period (0-100). "
+            "Output is amplitude during the high phase, 0 otherwise."
+        ),
+    ),
+
+    # ---- Group B: Math -----------------------------------------------------
+
+    "Gain": BlockSpec(
+        type_name="Gain",
+        display_name="Gain",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "gain": ("1.0", "Scalar gain factor applied to input"),
+        },
+        description="Multiplies input u by gain: y = gain * u.",
+    ),
+
+    "Abs": BlockSpec(
+        type_name="Abs",
+        display_name="Abs",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Absolute value: y = |u|.",
+    ),
+
+    "Sign": BlockSpec(
+        type_name="Sign",
+        display_name="Sign",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Sign function: y = 1 if u > 0, -1 if u < 0, 0 if u == 0.",
+    ),
+
+    "Sqrt": BlockSpec(
+        type_name="Sqrt",
+        display_name="Sqrt",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mode": ("sqrt", "sqrt: y=sqrt(|u|); signed_sqrt: y=sign(u)*sqrt(|u|)"),
+        },
+        description=(
+            "Square root block. mode='sqrt': y = sqrt(|u|). "
+            "mode='signed_sqrt': y = sign(u)*sqrt(|u|)."
+        ),
+    ),
+
+    "Saturation": BlockSpec(
+        type_name="Saturation",
+        display_name="Saturation",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "upper_limit": ("1.0",  "Maximum output value"),
+            "lower_limit": ("-1.0", "Minimum output value"),
+        },
+        description="Clips input to [lower_limit, upper_limit]: y = clip(u, lower, upper).",
+    ),
+
+    "DeadZone": BlockSpec(
+        type_name="DeadZone",
+        display_name="Dead Zone",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "lower_value": ("-0.5", "Lower dead-zone threshold"),
+            "upper_value": ("0.5",  "Upper dead-zone threshold"),
+        },
+        description=(
+            "Dead zone nonlinearity: y = u - upper if u > upper; "
+            "y = u - lower if u < lower; y = 0 inside the zone."
+        ),
+    ),
+
+    "MinMax": BlockSpec(
+        type_name="MinMax",
+        display_name="MinMax",
+        color="#e67e22",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("min", "min or max"),
+        },
+        description="Outputs min(u0,u1) or max(u0,u1) depending on function parameter.",
+    ),
+
+    # ---- Group C: Logic ----------------------------------------------------
+
+    "RelationalOperator": BlockSpec(
+        type_name="RelationalOperator",
+        display_name="Relational Op",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": (">", "Comparison: >, <, >=, <=, ==, !="),
+        },
+        description=(
+            "Compares u0 and u1 using the selected operator. "
+            "Output y = 1.0 if true, 0.0 if false."
+        ),
+    ),
+
+    "LogicalOperator": BlockSpec(
+        type_name="LogicalOperator",
+        display_name="Logical Op",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": ("AND", "Boolean operation: AND, OR, NOT, NAND, NOR, XOR"),
+        },
+        description=(
+            "Boolean logic gate. NOT uses only u0. "
+            "Inputs treated as boolean (nonzero = true). "
+            "Output y = 1.0 or 0.0."
+        ),
+    ),
+
+    "Switch": BlockSpec(
+        type_name="Switch",
+        display_name="Switch",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in"), PortSpec("u2", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "threshold": ("0.5", "Threshold value for control input u1"),
+            "criteria":  (">=",  "Comparison for u1 vs threshold: >, >=, =="),
+        },
+        description=(
+            "Three-input switch: y = u0 if u1 criteria threshold else u2. "
+            "u1 is the control input, u0 and u2 are data inputs."
+        ),
+    ),
+
+    # ---- Group D: Discrete -------------------------------------------------
+
+    "UnitDelay": BlockSpec(
+        type_name="UnitDelay",
+        display_name="Unit Delay",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Output at first sample (k=0)"),
+        },
+        description="One-sample delay: y[k] = u[k-1]. Also known as z^-1.",
+    ),
+
+    "DiscreteIntegrator": BlockSpec(
+        type_name="DiscreteIntegrator",
+        display_name="Discrete Integrator",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "gain_value":        ("1.0",   "Integrator gain K"),
+            "initial_condition": ("0.0",   "Initial state"),
+            "upper_limit":       ("1e10",  "Upper saturation limit"),
+            "lower_limit":       ("-1e10", "Lower saturation limit"),
+            "method":            ("Forward Euler", "Integration method: Forward Euler, Backward Euler, Trapezoidal"),
+        },
+        description=(
+            "Discrete-time integrator: y[k] = clip(y[k-1] + K*u[k]*Ts, lower, upper). "
+            "Supports Forward Euler, Backward Euler, and Trapezoidal methods."
+        ),
+    ),
+
+    "ZeroOrderHold": BlockSpec(
+        type_name="ZeroOrderHold",
+        display_name="Zero-Order Hold",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "sample_time": ("0.01", "Hold sample time in seconds (>= step time)"),
+        },
+        description=(
+            "Samples input every sample_time seconds and holds the value "
+            "between samples. Useful for rate transitions."
+        ),
+    ),
+
+    "Derivative": BlockSpec(
+        type_name="Derivative",
+        display_name="Derivative",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Assumed previous input value at k=0"),
+        },
+        description=(
+            "Numerical derivative: y[k] = (u[k] - u[k-1]) / Ts. "
+            "The initial_condition sets the assumed u[-1]."
+        ),
+    ),
+
+    # ---- Group E: Lookup ---------------------------------------------------
+
+    "Lookup1D": BlockSpec(
+        type_name="Lookup1D",
+        display_name="1-D Lookup",
+        color="#f39c12",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "breakpoints":    ("0 1",  "Space-separated breakpoint values (strictly increasing)"),
+            "table_data":     ("0 1",  "Space-separated output values (same length as breakpoints)"),
+            "extrapolation":  ("clip", "Extrapolation mode: clip or linear"),
+        },
+        description=(
+            "Piecewise-linear 1-D lookup table. "
+            "Interpolates between breakpoints; clips or extrapolates at boundaries."
+        ),
+    ),
+
+    # ---- Group F: STM32 HAL ------------------------------------------------
+
+    "ADC": BlockSpec(
+        type_name="ADC",
+        display_name="ADC",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "channel":    ("1",   "ADC channel number (1-16)"),
+            "resolution": ("12",  "ADC resolution bits: 6, 8, 10, or 12"),
+            "vref":       ("3.3", "Reference voltage in volts (> 0)"),
+            "sim_value":  ("0.0", "Constant voltage used during host simulation"),
+        },
+        description=(
+            "Reads an ADC channel and outputs the voltage in volts. "
+            "In host simulation, outputs the constant sim_value."
+        ),
+    ),
+
+    "DAC": BlockSpec(
+        type_name="DAC",
+        display_name="DAC",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "channel": ("1",   "DAC channel: 1 or 2"),
+            "vref":    ("3.3", "Reference voltage in volts (> 0)"),
+        },
+        description=(
+            "Converts input voltage to DAC output. "
+            "Input u is clamped to [0, vref] before conversion."
+        ),
+    ),
+
+    "PWMOut": BlockSpec(
+        type_name="PWMOut",
+        display_name="PWM Out",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "timer":        ("TIM2",   "HAL timer handle name (e.g. TIM2)"),
+            "channel":      ("1",      "Timer channel number (1-4)"),
+            "frequency_hz": ("1000",   "PWM frequency in Hz (> 0)"),
+            "max_duty":     ("100.0",  "Maximum duty cycle value (> 0)"),
+        },
+        description=(
+            "Sets PWM duty cycle from input u. "
+            "u is clamped to [0, max_duty] before setting the compare register."
+        ),
+    ),
+
+    "TimerTick": BlockSpec(
+        type_name="TimerTick",
+        display_name="Timer Tick",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "scale": ("0.001", "Scale factor: y = HAL_GetTick() * scale"),
+        },
+        description=(
+            "Outputs HAL_GetTick() * scale. "
+            "Default scale=0.001 converts milliseconds to seconds. "
+            "In simulation, y = t * 1000 * scale."
+        ),
+    ),
 }
 
 
@@ -1377,6 +1732,217 @@ def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
         if st is None or int(st) not in (0, 1):
             _bad("save_time", "E002", "Must be 0 or 1")
 
+    # ---- SineWave ---------------------------------------------------------
+    elif btype == "SineWave":
+        f = _num("frequency_hz", "1.0")
+        if f is None:    _bad("frequency_hz", "E001", "Must be a valid number or workspace expression")
+        elif f <= 0:     _bad("frequency_hz", "E002", "Frequency must be > 0 Hz")
+        if _num("amplitude", "1.0") is None:
+                         _bad("amplitude",    "E001", "Must be a valid number")
+        if _num("phase_deg", "0.0") is None:
+                         _bad("phase_deg",    "E001", "Must be a valid number")
+        if _num("offset", "0.0") is None:
+                         _bad("offset",       "E001", "Must be a valid number")
+
+    # ---- Ramp -------------------------------------------------------------
+    elif btype == "Ramp":
+        if _num("slope", "1.0") is None:
+            _bad("slope",          "E001", "Must be a valid number")
+        st = _num("start_time", "0.0")
+        if st is None:   _bad("start_time",     "E001", "Must be a valid number")
+        elif st < 0:     _bad("start_time",     "E002", "start_time must be >= 0")
+        if _num("initial_output", "0.0") is None:
+            _bad("initial_output", "E001", "Must be a valid number")
+
+    # ---- Clock ------------------------------------------------------------
+    elif btype == "Clock":
+        pass  # no params to validate
+
+    # ---- PulseGenerator ---------------------------------------------------
+    elif btype == "PulseGenerator":
+        if _num("amplitude", "1.0") is None:
+            _bad("amplitude",   "E001", "Must be a valid number")
+        per = _num("period", "1.0")
+        if per is None:  _bad("period",      "E001", "Must be a valid number")
+        elif per <= 0:   _bad("period",      "E002", "Period must be > 0")
+        pw = _num("pulse_width", "50")
+        if pw is None:   _bad("pulse_width", "E001", "Must be a valid number")
+        elif not (0.0 <= pw <= 100.0):
+                         _bad("pulse_width", "E002", "pulse_width must be in [0, 100]")
+        if _num("phase_delay", "0.0") is None:
+            _bad("phase_delay", "E001", "Must be a valid number")
+
+    # ---- Gain -------------------------------------------------------------
+    elif btype == "Gain":
+        if _num("gain", "1.0") is None:
+            _bad("gain", "E001", "Must be a valid number")
+
+    # ---- Abs --------------------------------------------------------------
+    elif btype == "Abs":
+        pass  # no params
+
+    # ---- Sign -------------------------------------------------------------
+    elif btype == "Sign":
+        pass  # no params
+
+    # ---- Sqrt -------------------------------------------------------------
+    elif btype == "Sqrt":
+        mode = p.get("mode", "sqrt").strip().lower()
+        if mode not in ("sqrt", "signed_sqrt"):
+            _bad("mode", "E003", "mode must be 'sqrt' or 'signed_sqrt'")
+
+    # ---- Saturation -------------------------------------------------------
+    elif btype == "Saturation":
+        ul = _num("upper_limit",  "1.0")
+        ll = _num("lower_limit", "-1.0")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+
+    # ---- DeadZone ---------------------------------------------------------
+    elif btype == "DeadZone":
+        uv = _num("upper_value",  "0.5")
+        lv = _num("lower_value", "-0.5")
+        if uv is None:   _bad("upper_value", "E001", "Must be a valid number")
+        if lv is None:   _bad("lower_value", "E001", "Must be a valid number")
+        if uv is not None and lv is not None and uv < lv:
+            _bad("upper_value", "E007", "upper_value must be >= lower_value")
+
+    # ---- MinMax -----------------------------------------------------------
+    elif btype == "MinMax":
+        fn = p.get("function", "min").strip().lower()
+        if fn not in ("min", "max"):
+            _bad("function", "E003", "function must be 'min' or 'max'")
+
+    # ---- RelationalOperator -----------------------------------------------
+    elif btype == "RelationalOperator":
+        op = p.get("operator", ">").strip()
+        if op not in (">", "<", ">=", "<=", "==", "!="):
+            _bad("operator", "E003", "operator must be one of: >, <, >=, <=, ==, !=")
+
+    # ---- LogicalOperator --------------------------------------------------
+    elif btype == "LogicalOperator":
+        op = p.get("operator", "AND").strip().upper()
+        if op not in ("AND", "OR", "NOT", "NAND", "NOR", "XOR"):
+            _bad("operator", "E003", "operator must be one of: AND, OR, NOT, NAND, NOR, XOR")
+
+    # ---- Switch -----------------------------------------------------------
+    elif btype == "Switch":
+        if _num("threshold", "0.5") is None:
+            _bad("threshold", "E001", "Must be a valid number")
+        crit = p.get("criteria", ">=").strip()
+        if crit not in (">", ">=", "=="):
+            _bad("criteria", "E003", "criteria must be one of: >, >=, ==")
+
+    # ---- UnitDelay --------------------------------------------------------
+    elif btype == "UnitDelay":
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- DiscreteIntegrator -----------------------------------------------
+    elif btype == "DiscreteIntegrator":
+        if _num("gain_value", "1.0") is None:
+            _bad("gain_value",        "E001", "Must be a valid number")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+        meth = p.get("method", "Forward Euler").strip()
+        valid_methods = ("Forward Euler", "Backward Euler", "Trapezoidal")
+        if meth not in valid_methods:
+            _bad("method", "E003", f"method must be one of: {', '.join(valid_methods)}")
+
+    # ---- ZeroOrderHold ----------------------------------------------------
+    elif btype == "ZeroOrderHold":
+        st = _num("sample_time", "0.01")
+        if st is None:   _bad("sample_time", "E001", "Must be a valid number")
+        elif st <= 0:    _bad("sample_time", "E002", "sample_time must be > 0")
+
+    # ---- Derivative -------------------------------------------------------
+    elif btype == "Derivative":
+        ic = _num("initial_condition", "0.0")
+        if ic is None or (isinstance(ic, float) and (math.isnan(ic) or math.isinf(ic))):
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- Lookup1D ---------------------------------------------------------
+    elif btype == "Lookup1D":
+        bp_str  = p.get("breakpoints", "0 1")
+        tbl_str = p.get("table_data",  "0 1")
+        bp_vals: List[float] = []
+        tbl_vals: List[float] = []
+        try:
+            bp_vals = [float(x) for x in bp_str.split()]
+            if not bp_vals:
+                _bad("breakpoints", "E001", "Must contain at least one value")
+        except ValueError:
+            _bad("breakpoints", "E001", "Must be space-separated numbers")
+        try:
+            tbl_vals = [float(x) for x in tbl_str.split()]
+            if not tbl_vals:
+                _bad("table_data", "E001", "Must contain at least one value")
+        except ValueError:
+            _bad("table_data", "E001", "Must be space-separated numbers")
+        if bp_vals and tbl_vals and len(bp_vals) != len(tbl_vals):
+            _bad("table_data", "E007",
+                 f"breakpoints ({len(bp_vals)}) and table_data ({len(tbl_vals)}) must have same length")
+        if len(bp_vals) >= 2:
+            for i in range(len(bp_vals) - 1):
+                if bp_vals[i] >= bp_vals[i+1]:
+                    _bad("breakpoints", "E002", "breakpoints must be strictly increasing")
+                    break
+        extrap = p.get("extrapolation", "clip").strip().lower()
+        if extrap not in ("clip", "linear"):
+            _bad("extrapolation", "E003", "extrapolation must be 'clip' or 'linear'")
+
+    # ---- ADC --------------------------------------------------------------
+    elif btype == "ADC":
+        ch = _num("channel", "1")
+        if ch is None or not (1 <= int(ch) <= 16):
+            _bad("channel", "E002", "channel must be an integer in [1, 16]")
+        res = _num("resolution", "12")
+        if res is None or int(res) not in (6, 8, 10, 12):
+            _bad("resolution", "E002", "resolution must be 6, 8, 10, or 12")
+        vr = _num("vref", "3.3")
+        if vr is None:   _bad("vref",      "E001", "Must be a valid number")
+        elif vr <= 0:    _bad("vref",      "E002", "vref must be > 0")
+        if _num("sim_value", "0.0") is None:
+            _bad("sim_value", "E001", "Must be a valid number")
+
+    # ---- DAC --------------------------------------------------------------
+    elif btype == "DAC":
+        ch = _num("channel", "1")
+        if ch is None or int(ch) not in (1, 2):
+            _bad("channel", "E002", "channel must be 1 or 2")
+        vr = _num("vref", "3.3")
+        if vr is None:   _bad("vref", "E001", "Must be a valid number")
+        elif vr <= 0:    _bad("vref", "E002", "vref must be > 0")
+
+    # ---- PWMOut -----------------------------------------------------------
+    elif btype == "PWMOut":
+        timer = p.get("timer", "").strip()
+        if not timer:
+            _bad("timer", "E003", "timer name cannot be empty (e.g. TIM2)")
+        ch = _num("channel", "1")
+        if ch is None or int(ch) not in (1, 2, 3, 4):
+            _bad("channel", "E002", "channel must be 1, 2, 3, or 4")
+        fhz = _num("frequency_hz", "1000")
+        if fhz is None:  _bad("frequency_hz", "E001", "Must be a valid number")
+        elif fhz <= 0:   _bad("frequency_hz", "E002", "frequency_hz must be > 0")
+        md = _num("max_duty", "100.0")
+        if md is None:   _bad("max_duty", "E001", "Must be a valid number")
+        elif md <= 0:    _bad("max_duty", "E002", "max_duty must be > 0")
+
+    # ---- TimerTick --------------------------------------------------------
+    elif btype == "TimerTick":
+        sc = _num("scale", "0.001")
+        if sc is None:   _bad("scale", "E001", "Must be a valid number")
+        elif sc == 0:    _bad("scale", "E002", "scale must be != 0")
+
     return errors
 
 
@@ -1461,6 +2027,39 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             fv  = pval(b["params"].get("final_value",    "1.0"))
             outs[(b["id"], "y")] = np.where(t >= st, fv, iv)
 
+        elif b["type"] == "SineWave":
+            freq  = pval(b["params"].get("frequency_hz", "1.0"))
+            amp   = pval(b["params"].get("amplitude",    "1.0"))
+            phase = pval(b["params"].get("phase_deg",    "0.0")) * np.pi / 180.0
+            off   = pval(b["params"].get("offset",       "0.0"))
+            outs[(b["id"], "y")] = amp * np.sin(2 * np.pi * freq * t + phase) + off
+
+        elif b["type"] == "Ramp":
+            slope = pval(b["params"].get("slope",          "1.0"))
+            start = pval(b["params"].get("start_time",     "0.0"))
+            init  = pval(b["params"].get("initial_output", "0.0"))
+            outs[(b["id"], "y")] = np.where(t >= start, init + slope * (t - start), init)
+
+        elif b["type"] == "Clock":
+            outs[(b["id"], "y")] = t.copy()
+
+        elif b["type"] == "PulseGenerator":
+            amp   = pval(b["params"].get("amplitude",   "1.0"))
+            per   = max(1e-9, pval(b["params"].get("period",       "1.0")))
+            pw    = pval(b["params"].get("pulse_width",  "50")) / 100.0
+            delay = pval(b["params"].get("phase_delay",  "0.0"))
+            t_rel = np.where(t >= delay, np.mod(t - delay, per), -1.0)
+            outs[(b["id"], "y")] = np.where((t >= delay) & (t_rel < pw * per), amp, 0.0)
+
+        elif b["type"] == "ADC":
+            sim_val = pval(b["params"].get("sim_value", "0.0"))
+            outs[(b["id"], "y")] = np.full(n, sim_val)
+
+        elif b["type"] == "TimerTick":
+            scale = pval(b["params"].get("scale", "0.001"))
+            # t is in seconds; HAL_GetTick is ms, so sim output = t * 1000 * scale
+            outs[(b["id"], "y")] = t * 1000.0 * scale
+
     # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
     for c in model["connections"]:
@@ -1539,6 +2138,124 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 y[k]   = max(lower, min(upper, raw))
             outs[(bid, "y")] = y
 
+        elif b["type"] == "Gain":
+            k = pval(b["params"].get("gain", "1.0"))
+            outs[(bid, "y")] = k * _input("u")
+
+        elif b["type"] == "Abs":
+            outs[(bid, "y")] = np.abs(_input("u"))
+
+        elif b["type"] == "Sign":
+            outs[(bid, "y")] = np.sign(_input("u")).astype(float)
+
+        elif b["type"] == "Sqrt":
+            u = _input("u")
+            if b["params"].get("mode", "sqrt").strip().lower() == "signed_sqrt":
+                outs[(bid, "y")] = np.sign(u) * np.sqrt(np.abs(u))
+            else:
+                outs[(bid, "y")] = np.sqrt(np.abs(u))
+
+        elif b["type"] == "Saturation":
+            upper = pval(b["params"].get("upper_limit",  "1.0"))
+            lower = pval(b["params"].get("lower_limit", "-1.0"))
+            outs[(bid, "y")] = np.clip(_input("u"), lower, upper)
+
+        elif b["type"] == "DeadZone":
+            u = _input("u")
+            upper = pval(b["params"].get("upper_value",  "0.5"))
+            lower = pval(b["params"].get("lower_value", "-0.5"))
+            outs[(bid, "y")] = np.where(u > upper, u - upper,
+                               np.where(u < lower, u - lower, 0.0))
+
+        elif b["type"] == "MinMax":
+            fn = b["params"].get("function", "min").strip().lower()
+            u0, u1 = _input("u0"), _input("u1")
+            outs[(bid, "y")] = np.minimum(u0, u1) if fn == "min" else np.maximum(u0, u1)
+
+        elif b["type"] == "RelationalOperator":
+            op = b["params"].get("operator", ">").strip()
+            u0, u1 = _input("u0"), _input("u1")
+            result = {">" : u0 > u1, "<" : u0 < u1, ">=": u0 >= u1,
+                      "<=": u0 <= u1, "==": u0 == u1, "!=": u0 != u1}.get(op, u0 > u1)
+            outs[(bid, "y")] = result.astype(float)
+
+        elif b["type"] == "LogicalOperator":
+            op = b["params"].get("operator", "AND").strip().upper()
+            a = _input("u0") != 0
+            b_ = _input("u1") != 0
+            ops = {"AND": a & b_, "OR": a | b_, "NOT": ~a,
+                   "NAND": ~(a & b_), "NOR": ~(a | b_), "XOR": a ^ b_}
+            outs[(bid, "y")] = ops.get(op, a & b_).astype(float)
+
+        elif b["type"] == "Switch":
+            thr  = pval(b["params"].get("threshold", "0.5"))
+            crit = b["params"].get("criteria", ">=").strip()
+            u0, u1, u2 = _input("u0"), _input("u1"), _input("u2")
+            cond = (u1 > thr) if crit == ">" else (u1 == thr) if crit == "==" else (u1 >= thr)
+            outs[(bid, "y")] = np.where(cond, u0, u2)
+
+        elif b["type"] == "UnitDelay":
+            ic = pval(b["params"].get("initial_condition", "0.0"))
+            u  = _input("u")
+            outs[(bid, "y")] = np.concatenate([[ic], u[:-1]])
+
+        elif b["type"] == "DiscreteIntegrator":
+            K     = pval(b["params"].get("gain_value",        "1.0"))
+            ic    = pval(b["params"].get("initial_condition", "0.0"))
+            upper = pval(b["params"].get("upper_limit",  "1e10"))
+            lower = pval(b["params"].get("lower_limit", "-1e10"))
+            meth  = b["params"].get("method", "Forward Euler").strip()
+            u = _input("u")
+            y = np.empty(n)
+            state = ic
+            for k in range(n):
+                y[k] = max(lower, min(upper, state))
+                if meth == "Backward Euler":
+                    state = max(lower, min(upper, state + K * u[k] * step_s))
+                elif meth.lower().startswith("trap"):
+                    prev = u[k-1] if k > 0 else u[0]
+                    state = max(lower, min(upper, state + K * 0.5 * (u[k] + prev) * step_s))
+                else:
+                    state = max(lower, min(upper, state + K * u[k] * step_s))
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "ZeroOrderHold":
+            sample_t = max(step_s, pval(b["params"].get("sample_time", "0.01")))
+            u  = _input("u")
+            y  = np.empty(n)
+            held      = u[0]
+            next_samp = 0.0
+            for k in range(n):
+                if t[k] >= next_samp:
+                    held = u[k]
+                    next_samp += sample_t
+                y[k] = held
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "Derivative":
+            ic = pval(b["params"].get("initial_condition", "0.0"))
+            u  = _input("u")
+            u_prev = np.concatenate([[ic], u[:-1]])
+            outs[(bid, "y")] = (u - u_prev) / step_s
+
+        elif b["type"] == "Lookup1D":
+            u    = _input("u")
+            extrap = b["params"].get("extrapolation", "clip").strip().lower()
+            try:
+                bp  = np.array([float(x) for x in b["params"].get("breakpoints","0 1").split()])
+                tbl = np.array([float(x) for x in b["params"].get("table_data", "0 1").split()])
+                if extrap == "linear" and len(bp) >= 2:
+                    sl = (tbl[1]-tbl[0])/(bp[1]-bp[0]) if bp[1] != bp[0] else 0.0
+                    sr = (tbl[-1]-tbl[-2])/(bp[-1]-bp[-2]) if bp[-1] != bp[-2] else 0.0
+                    y = np.where(u < bp[0],  tbl[0]  + sl*(u-bp[0]),
+                        np.where(u > bp[-1], tbl[-1] + sr*(u-bp[-1]),
+                        np.interp(u, bp, tbl)))
+                else:
+                    y = np.interp(u, bp, tbl)
+            except Exception:
+                y = np.zeros(n)
+            outs[(bid, "y")] = y
+
     # ToWorkspace: capture signal into the Python workspace and expose it to
     # the Simulate Scope tab so the user can see what was saved.
     for b in model["blocks"]:
@@ -1583,6 +2300,12 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 if sig is not None:
                     thr = pval(b["params"]["threshold"])
                     display[f"{b['id']}.pin"] = (sig > thr).astype(float)
+        elif b["type"] in ("DAC", "PWMOut"):
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
         elif b["type"] == "ToWorkspace":
             saved = outs.get((b["id"], "_saved"))
             if saved is not None:

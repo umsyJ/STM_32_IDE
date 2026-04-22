@@ -204,7 +204,32 @@ def _emit_decls(blocks: List[dict]) -> str:
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] in ("Step", "Integrator", "TransferFcn", "PID"):
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
-        # GpioOut, Scope, ToWorkspace: no signal output
+        # Group A sources
+        elif b["type"] in ("SineWave", "Ramp", "Clock", "PulseGenerator", "ADC", "TimerTick"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        # Group B Math
+        elif b["type"] in ("Gain", "Abs", "Sign", "Sqrt", "Saturation", "DeadZone", "MinMax"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        # Group C Logic
+        elif b["type"] in ("RelationalOperator", "LogicalOperator", "Switch"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        # Group D Discrete — output + state
+        elif b["type"] == "UnitDelay":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _state_{b['id']} = 0.0f;")
+        elif b["type"] == "DiscreteIntegrator":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _state_{b['id']} = 0.0f;")
+        elif b["type"] == "ZeroOrderHold":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _state_{b['id']} = 0.0f;")
+        elif b["type"] == "Derivative":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _state_{b['id']} = 0.0f;")
+        # Group E Lookup
+        elif b["type"] == "Lookup1D":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        # GpioOut, Scope, ToWorkspace, DAC, PWMOut: no signal output
     return "\n".join(decls)
 
 
@@ -537,6 +562,391 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
             )
             lines.append( "        }")
             lines.append( "    }")
+
+        # ---- Group A: Sources ----------------------------------------------
+
+        elif t == "SineWave":
+            try:
+                freq     = float(workspace.eval_param(p.get("frequency_hz", "1.0")))
+                amp      = float(workspace.eval_param(p.get("amplitude",    "1.0")))
+                phase_d  = float(workspace.eval_param(p.get("phase_deg",    "0.0")))
+                off      = float(workspace.eval_param(p.get("offset",       "0.0")))
+            except Exception:
+                freq, amp, phase_d, off = 1.0, 1.0, 0.0, 0.0
+            import math as _math
+            phase_rad = phase_d * _math.pi / 180.0
+            lines.append(f"    /* block {bid}: SineWave */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _cnt_{bid} = 0;")
+            lines.append(f"        float _t_{bid} = _cnt_{bid} * {dt_s:.6f}f;")
+            lines.append(
+                f"        {_sig_var(bid,'y')} = {amp:.6f}f * sinf(2.0f * 3.14159265f"
+                f" * {freq:.6f}f * _t_{bid} + {phase_rad:.6f}f) + {off:.6f}f;"
+            )
+            lines.append(f"        _cnt_{bid}++;")
+            lines.append( "    }")
+
+        elif t == "Ramp":
+            try:
+                slope = float(workspace.eval_param(p.get("slope",          "1.0")))
+                start = float(workspace.eval_param(p.get("start_time",     "0.0")))
+                init  = float(workspace.eval_param(p.get("initial_output", "0.0")))
+            except Exception:
+                slope, start, init = 1.0, 0.0, 0.0
+            lines.append(f"    /* block {bid}: Ramp */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _cnt_{bid} = 0;")
+            lines.append(f"        float _t_{bid} = _cnt_{bid} * {dt_s:.6f}f;")
+            lines.append(
+                f"        {_sig_var(bid,'y')} = (_t_{bid} >= {start:.6f}f)"
+                f" ? ({init:.6f}f + {slope:.6f}f * (_t_{bid} - {start:.6f}f))"
+                f" : {init:.6f}f;"
+            )
+            lines.append(f"        _cnt_{bid}++;")
+            lines.append( "    }")
+
+        elif t == "Clock":
+            lines.append(f"    /* block {bid}: Clock */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _cnt_{bid} = 0;")
+            lines.append(f"        {_sig_var(bid,'y')} = _cnt_{bid} * {dt_s:.6f}f;")
+            lines.append(f"        _cnt_{bid}++;")
+            lines.append( "    }")
+
+        elif t == "PulseGenerator":
+            try:
+                amp    = float(workspace.eval_param(p.get("amplitude",   "1.0")))
+                per    = max(1e-9, float(workspace.eval_param(p.get("period",      "1.0"))))
+                pw_pct = float(workspace.eval_param(p.get("pulse_width", "50")))
+                delay  = float(workspace.eval_param(p.get("phase_delay", "0.0")))
+            except Exception:
+                amp, per, pw_pct, delay = 1.0, 1.0, 50.0, 0.0
+            pw_frac = pw_pct / 100.0
+            lines.append(f"    /* block {bid}: PulseGenerator */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _cnt_{bid} = 0;")
+            lines.append(f"        float _t_{bid} = _cnt_{bid} * {dt_s:.6f}f;")
+            lines.append(f"        float _rel_{bid} = fmodf(_t_{bid} - {delay:.6f}f, {per:.6f}f);")
+            lines.append(
+                f"        {_sig_var(bid,'y')} = ((_t_{bid} >= {delay:.6f}f)"
+                f" && (_rel_{bid} < {pw_frac:.6f}f * {per:.6f}f)) ? {amp:.6f}f : 0.0f;"
+            )
+            lines.append(f"        _cnt_{bid}++;")
+            lines.append( "    }")
+
+        elif t == "ADC":
+            try:
+                channel    = int(float(workspace.eval_param(p.get("channel",    "1"))))
+                resolution = int(float(workspace.eval_param(p.get("resolution", "12"))))
+                vref       = float(workspace.eval_param(p.get("vref",       "3.3")))
+            except Exception:
+                channel, resolution, vref = 1, 12, 3.3
+            maxraw = (1 << resolution) - 1
+            lines.append(f"    /* block {bid}: ADC channel {channel} */")
+            lines.append( "    {")
+            lines.append( "        HAL_ADC_Start(&hadc1);")
+            lines.append( "        if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {")
+            lines.append(
+                f"            {_sig_var(bid,'y')} = (HAL_ADC_GetValue(&hadc1)"
+                f" / {maxraw}.0f) * {vref:.6f}f;"
+            )
+            lines.append( "        }")
+            lines.append( "        HAL_ADC_Stop(&hadc1);")
+            lines.append( "    }")
+
+        elif t == "TimerTick":
+            try:
+                scale = float(workspace.eval_param(p.get("scale", "0.001")))
+            except Exception:
+                scale = 0.001
+            lines.append(f"    /* block {bid}: TimerTick */")
+            lines.append(f"    {_sig_var(bid,'y')} = HAL_GetTick() * {scale:.6f}f;")
+
+        # ---- Group B: Math -------------------------------------------------
+
+        elif t == "Gain":
+            try:
+                gain = float(workspace.eval_param(p.get("gain", "1.0")))
+            except Exception:
+                gain = 1.0
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: Gain */")
+            lines.append(f"    {_sig_var(bid,'y')} = {gain:.6f}f * {u_expr};")
+
+        elif t == "Abs":
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: Abs */")
+            lines.append(f"    {_sig_var(bid,'y')} = fabsf({u_expr});")
+
+        elif t == "Sign":
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: Sign */")
+            lines.append(
+                f"    {_sig_var(bid,'y')} = ({u_expr} > 0.0f) ? 1.0f"
+                f" : ({u_expr} < 0.0f) ? -1.0f : 0.0f;"
+            )
+
+        elif t == "Sqrt":
+            mode   = p.get("mode", "sqrt").strip().lower()
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: Sqrt mode={mode} */")
+            if mode == "signed_sqrt":
+                lines.append(
+                    f"    {_sig_var(bid,'y')} = ({u_expr} >= 0.0f)"
+                    f" ? sqrtf({u_expr}) : -sqrtf(-{u_expr});"
+                )
+            else:
+                lines.append(f"    {_sig_var(bid,'y')} = sqrtf(fabsf({u_expr}));")
+
+        elif t == "Saturation":
+            upper  = num(p.get("upper_limit",  "1.0"),  1.0)
+            lower  = num(p.get("lower_limit", "-1.0"), -1.0)
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: Saturation */")
+            lines.append( "    {")
+            lines.append(f"        float _u_{bid} = {u_expr};")
+            lines.append(
+                f"        {_sig_var(bid,'y')} = (_u_{bid} > {upper}) ? {upper}"
+                f" : (_u_{bid} < {lower}) ? {lower} : _u_{bid};"
+            )
+            lines.append( "    }")
+
+        elif t == "DeadZone":
+            upper  = num(p.get("upper_value",  "0.5"),  0.5)
+            lower  = num(p.get("lower_value", "-0.5"), -0.5)
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: DeadZone */")
+            lines.append( "    {")
+            lines.append(f"        float _u_{bid} = {u_expr};")
+            lines.append(f"        if      (_u_{bid} > {upper}) {_sig_var(bid,'y')} = _u_{bid} - {upper};")
+            lines.append(f"        else if (_u_{bid} < {lower}) {_sig_var(bid,'y')} = _u_{bid} - {lower};")
+            lines.append(f"        else                          {_sig_var(bid,'y')} = 0.0f;")
+            lines.append( "    }")
+
+        elif t == "MinMax":
+            fn     = p.get("function", "min").strip().lower()
+            u0     = get_input(bid, "u0")
+            u1     = get_input(bid, "u1")
+            cfunc  = "fminf" if fn == "min" else "fmaxf"
+            lines.append(f"    /* block {bid}: MinMax ({fn}) */")
+            lines.append(f"    {_sig_var(bid,'y')} = {cfunc}({u0}, {u1});")
+
+        # ---- Group C: Logic ------------------------------------------------
+
+        elif t == "RelationalOperator":
+            op  = p.get("operator", ">").strip()
+            u0  = get_input(bid, "u0")
+            u1  = get_input(bid, "u1")
+            op_map = {
+                ">":  f"({u0} > {u1})",
+                "<":  f"({u0} < {u1})",
+                ">=": f"({u0} >= {u1})",
+                "<=": f"({u0} <= {u1})",
+                "==": f"({u0} == {u1})",
+                "!=": f"({u0} != {u1})",
+            }
+            cond = op_map.get(op, f"({u0} > {u1})")
+            lines.append(f"    /* block {bid}: RelationalOperator ({op}) */")
+            lines.append(f"    {_sig_var(bid,'y')} = {cond} ? 1.0f : 0.0f;")
+
+        elif t == "LogicalOperator":
+            op = p.get("operator", "AND").strip().upper()
+            u0 = get_input(bid, "u0")
+            u1 = get_input(bid, "u1")
+            lines.append(f"    /* block {bid}: LogicalOperator {op} */")
+            if op == "AND":
+                expr = f"(({u0} != 0.0f) && ({u1} != 0.0f))"
+            elif op == "OR":
+                expr = f"(({u0} != 0.0f) || ({u1} != 0.0f))"
+            elif op == "NOT":
+                expr = f"({u0} == 0.0f)"
+            elif op == "NAND":
+                expr = f"!(({u0} != 0.0f) && ({u1} != 0.0f))"
+            elif op == "NOR":
+                expr = f"!(({u0} != 0.0f) || ({u1} != 0.0f))"
+            elif op == "XOR":
+                expr = f"(({u0} != 0.0f) != ({u1} != 0.0f))"
+            else:
+                expr = f"(({u0} != 0.0f) && ({u1} != 0.0f))"
+            lines.append(f"    {_sig_var(bid,'y')} = {expr} ? 1.0f : 0.0f;")
+
+        elif t == "Switch":
+            thr    = num(p.get("threshold", "0.5"), 0.5)
+            crit   = p.get("criteria", ">=").strip()
+            u0     = get_input(bid, "u0")
+            u1     = get_input(bid, "u1")
+            u2     = get_input(bid, "u2")
+            if crit == ">":
+                cond = f"({u1} > {thr})"
+            elif crit == "==":
+                cond = f"({u1} == {thr})"
+            else:
+                cond = f"({u1} >= {thr})"
+            lines.append(f"    /* block {bid}: Switch criteria={crit} threshold={thr} */")
+            lines.append(f"    {_sig_var(bid,'y')} = {cond} ? {u0} : {u2};")
+
+        # ---- Group D: Discrete ---------------------------------------------
+
+        elif t == "UnitDelay":
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: UnitDelay */")
+            lines.append(f"    {_sig_var(bid,'y')} = _state_{bid};")
+            lines.append(f"    _state_{bid} = {u_expr};")
+
+        elif t == "DiscreteIntegrator":
+            K      = num(p.get("gain_value",        "1.0"),  1.0)
+            upper  = num(p.get("upper_limit",  "1e10"),  1e10)
+            lower  = num(p.get("lower_limit", "-1e10"), -1e10)
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: DiscreteIntegrator */")
+            lines.append( "    {")
+            lines.append(f"        float _out_{bid} = _state_{bid};")
+            lines.append(f"        if (_out_{bid} > {upper}) _out_{bid} = {upper};")
+            lines.append(f"        if (_out_{bid} < {lower}) _out_{bid} = {lower};")
+            lines.append(f"        {_sig_var(bid,'y')} = _out_{bid};")
+            lines.append(f"        _state_{bid} += {K} * {u_expr} * {dt_s:.6f}f;")
+            lines.append(f"        if (_state_{bid} > {upper}) _state_{bid} = {upper};")
+            lines.append(f"        if (_state_{bid} < {lower}) _state_{bid} = {lower};")
+            lines.append( "    }")
+
+        elif t == "ZeroOrderHold":
+            try:
+                sample_t = max(dt_s, float(workspace.eval_param(p.get("sample_time", "0.01"))))
+            except Exception:
+                sample_t = 0.01
+            period_ticks = max(1, round(sample_t / dt_s))
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: ZeroOrderHold sample_time={sample_t:.4f} */")
+            lines.append( "    {")
+            lines.append(f"        static uint32_t _hcnt_{bid} = 0;")
+            lines.append(f"        static uint32_t _hper_{bid} = {period_ticks}u;")
+            lines.append(
+                f"        if ((_hper_{bid} == 0) || ((_hcnt_{bid} % _hper_{bid}) == 0))"
+                f" _state_{bid} = {u_expr};"
+            )
+            lines.append(f"        {_sig_var(bid,'y')} = _state_{bid};")
+            lines.append(
+                f"        if (++_hcnt_{bid} >= _hper_{bid} && _hper_{bid} > 0)"
+                f" _hcnt_{bid} = 0;"
+            )
+            lines.append( "    }")
+
+        elif t == "Derivative":
+            u_expr  = get_input(bid, "u")
+            inv_dt  = 1.0 / dt_s
+            lines.append(f"    /* block {bid}: Derivative */")
+            lines.append(f"    {_sig_var(bid,'y')} = ({u_expr} - _state_{bid}) * {inv_dt:.6f}f;")
+            lines.append(f"    _state_{bid} = {u_expr};")
+
+        # ---- Group E: Lookup -----------------------------------------------
+
+        elif t == "Lookup1D":
+            u_expr  = get_input(bid, "u")
+            bp_str  = p.get("breakpoints", "0 1")
+            tbl_str = p.get("table_data",  "0 1")
+            extrap  = p.get("extrapolation", "clip").strip().lower()
+            try:
+                bp_vals  = [float(x) for x in bp_str.split()]
+                tbl_vals = [float(x) for x in tbl_str.split()]
+                sz = len(bp_vals)
+                bp_list  = "{" + ", ".join(f"{v:.6f}f" for v in bp_vals)  + "}"
+                td_list  = "{" + ", ".join(f"{v:.6f}f" for v in tbl_vals) + "}"
+            except Exception:
+                bp_vals, tbl_vals, sz = [0.0, 1.0], [0.0, 1.0], 2
+                bp_list = "{0.000000f, 1.000000f}"
+                td_list = "{0.000000f, 1.000000f}"
+            lines.append(f"    /* block {bid}: Lookup1D (extrapolation={extrap}) */")
+            lines.append( "    {")
+            lines.append(f"        static const float _bp_{bid}[] = {bp_list};")
+            lines.append(f"        static const float _td_{bid}[] = {td_list};")
+            lines.append(f"        static const int   _sz_{bid}   = {sz};")
+            lines.append(f"        float _x_{bid} = {u_expr};")
+            lines.append(f"        float _y_{bid};")
+            lines.append(f"        if (_x_{bid} <= _bp_{bid}[0]) {{")
+            if extrap == "linear" and sz >= 2:
+                lines.append(f"            float _sl_{bid} = (_td_{bid}[1] - _td_{bid}[0])"
+                              f" / (_bp_{bid}[1] - _bp_{bid}[0]);")
+                lines.append(f"            _y_{bid} = _td_{bid}[0] + _sl_{bid}"
+                              f" * (_x_{bid} - _bp_{bid}[0]);")
+            else:
+                lines.append(f"            _y_{bid} = _td_{bid}[0];")
+            lines.append(f"        }} else if (_x_{bid} >= _bp_{bid}[_sz_{bid}-1]) {{")
+            if extrap == "linear" and sz >= 2:
+                lines.append(f"            float _sr_{bid} = (_td_{bid}[_sz_{bid}-1]"
+                              f" - _td_{bid}[_sz_{bid}-2])"
+                              f" / (_bp_{bid}[_sz_{bid}-1] - _bp_{bid}[_sz_{bid}-2]);")
+                lines.append(f"            _y_{bid} = _td_{bid}[_sz_{bid}-1] + _sr_{bid}"
+                              f" * (_x_{bid} - _bp_{bid}[_sz_{bid}-1]);")
+            else:
+                lines.append(f"            _y_{bid} = _td_{bid}[_sz_{bid}-1];")
+            lines.append( "        } else {")
+            lines.append(f"            int _i_{bid} = 0;")
+            lines.append(
+                f"            while (_i_{bid} < _sz_{bid}-2"
+                f" && _x_{bid} >= _bp_{bid}[_i_{bid}+1]) _i_{bid}++;"
+            )
+            lines.append(
+                f"            float _t_{bid} = (_x_{bid} - _bp_{bid}[_i_{bid}])"
+                f" / (_bp_{bid}[_i_{bid}+1] - _bp_{bid}[_i_{bid}]);"
+            )
+            lines.append(
+                f"            _y_{bid} = _td_{bid}[_i_{bid}] + _t_{bid}"
+                f" * (_td_{bid}[_i_{bid}+1] - _td_{bid}[_i_{bid}]);"
+            )
+            lines.append( "        }")
+            lines.append(f"        {_sig_var(bid,'y')} = _y_{bid};")
+            lines.append( "    }")
+
+        # ---- Group F: STM32 HAL --------------------------------------------
+
+        elif t == "DAC":
+            try:
+                ch   = int(float(workspace.eval_param(p.get("channel", "1"))))
+                vref = float(workspace.eval_param(p.get("vref",    "3.3")))
+            except Exception:
+                ch, vref = 1, 3.3
+            u_expr   = get_input(bid, "u")
+            ch_macro = "DAC_CHANNEL_1" if ch == 1 else "DAC_CHANNEL_2"
+            lines.append(f"    /* block {bid}: DAC channel {ch} */")
+            lines.append( "    {")
+            lines.append(f"        float _v_{bid} = {u_expr};")
+            lines.append(f"        if (_v_{bid} < 0.0f) _v_{bid} = 0.0f;")
+            lines.append(f"        if (_v_{bid} > {vref:.6f}f) _v_{bid} = {vref:.6f}f;")
+            lines.append(
+                f"        uint32_t _raw_{bid} = (uint32_t)((_v_{bid}"
+                f" / {vref:.6f}f) * 4095.0f);"
+            )
+            lines.append(
+                f"        HAL_DAC_SetValue(&hdac, {ch_macro},"
+                f" DAC_ALIGN_12B_R, _raw_{bid});"
+            )
+            lines.append(f"        HAL_DAC_Start(&hdac, {ch_macro});")
+            lines.append( "    }")
+
+        elif t == "PWMOut":
+            try:
+                timer    = p.get("timer", "TIM2").strip()
+                ch       = int(float(workspace.eval_param(p.get("channel",    "1"))))
+                max_duty = float(workspace.eval_param(p.get("max_duty",  "100.0")))
+            except Exception:
+                timer, ch, max_duty = "TIM2", 1, 100.0
+            u_expr      = get_input(bid, "u")
+            timer_lower = timer.lower()
+            ch_macro    = f"TIM_CHANNEL_{ch}"
+            lines.append(f"    /* block {bid}: PWMOut {timer} CH{ch} */")
+            lines.append( "    {")
+            lines.append(f"        float _duty_{bid} = {u_expr};")
+            lines.append(f"        if (_duty_{bid} < 0.0f)          _duty_{bid} = 0.0f;")
+            lines.append(f"        if (_duty_{bid} > {max_duty:.6f}f) _duty_{bid} = {max_duty:.6f}f;")
+            lines.append(f"        uint32_t _arr_{bid} = __HAL_TIM_GET_AUTORELOAD(&h{timer_lower});")
+            lines.append(
+                f"        __HAL_TIM_SET_COMPARE(&h{timer_lower}, {ch_macro},"
+            )
+            lines.append(
+                f"            (uint32_t)((_duty_{bid} / {max_duty:.6f}f) * _arr_{bid}));"
+            )
+            lines.append( "    }")
+
     return "\n".join(lines), streamed
 
 
