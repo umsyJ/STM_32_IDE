@@ -1133,6 +1133,53 @@ class BlockScene(QGraphicsScene):
             "connections": [c.to_dict() for c in self.connections],
         }
 
+    def load_from_dict(self, data: dict) -> None:
+        """Clear the canvas and rebuild from a saved model dict.
+
+        This is safer than calling __init__() again because it keeps the
+        QGraphicsScene object alive (preserving all Qt signal connections).
+        """
+        # Remove all Qt graphics items and reset Python-level state.
+        self.clear()                        # removes all QGraphicsItems
+        self.blocks.clear()
+        self.connections.clear()
+        self.connection_items.clear()
+        self._pending_src = None
+        self._drag_wire   = None
+        self._highlighted_port = None
+        self._id_counter  = 1
+
+        # Restore blocks, preserving saved IDs and positions.
+        positions: Dict[str, "BlockItem"] = {}
+        for b in data.get("blocks", []):
+            if b["type"] not in BLOCK_CATALOG:
+                continue  # skip unknown block types gracefully
+            item = self.add_block_by_type(b["type"], QPointF(b["x"], b["y"]))
+            # Overwrite the auto-generated ID with the saved one.
+            old_id = item.instance.block_id
+            self.blocks.pop(old_id, None)
+            item.instance.block_id = b["id"]
+            item.instance.params.update(b.get("params", {}))
+            self.blocks[b["id"]] = item
+            positions[b["id"]] = item
+            # Advance counter past any numeric suffix so new blocks don't clash.
+            parts = b["id"].rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                self._id_counter = max(self._id_counter, int(parts[1]) + 1)
+
+        # Restore connections.
+        for c in data.get("connections", []):
+            src_item = positions.get(c["src_block"])
+            dst_item = positions.get(c["dst_block"])
+            if src_item is None or dst_item is None:
+                continue
+            src_port = next(
+                (p for p in src_item.output_ports if p.port_name == c["src_port"]), None)
+            dst_port = next(
+                (p for p in dst_item.input_ports  if p.port_name == c["dst_port"]), None)
+            if src_port and dst_port:
+                self.add_connection(src_port, dst_port)
+
 
 class BlockView(QGraphicsView):
     def __init__(self, scene: BlockScene):
@@ -2740,7 +2787,13 @@ class MainWindow(QMainWindow):
         # worker
         self._worker: Optional[BuildFlashWorker] = None
 
+        # file tracking
+        self._current_file: Optional[Path] = None
+        self._is_dirty: bool = False
+        self.scene.changed.connect(self._mark_dirty)
+
         self._example_model()
+        self._set_clean(None)   # example isn't a real saved file
 
     # --- UI ---------------------------------------------------------------
 
@@ -2785,15 +2838,43 @@ class MainWindow(QMainWindow):
         sb.showMessage("Ready.")
 
     def _make_menu(self) -> None:
+        from PyQt5.QtGui import QKeySequence
         m = self.menuBar()
         file_m = m.addMenu("&File")
-        save_a = QAction("Save Model...", self); save_a.triggered.connect(self.save_model)
-        open_a = QAction("Open Model...", self); open_a.triggered.connect(self.open_model)
-        export_a = QAction("Export Generated C...", self); export_a.triggered.connect(self.export_c)
-        file_m.addAction(open_a); file_m.addAction(save_a); file_m.addSeparator()
-        file_m.addAction(export_a)
+
+        new_a = QAction("&New", self)
+        new_a.setShortcut(QKeySequence.New)
+        new_a.triggered.connect(self.new_model)
+        file_m.addAction(new_a)
+
         file_m.addSeparator()
-        quit_a = QAction("Quit", self); quit_a.triggered.connect(self.close)
+
+        open_a = QAction("&Open...", self)
+        open_a.setShortcut(QKeySequence.Open)
+        open_a.triggered.connect(self.open_model)
+        file_m.addAction(open_a)
+
+        save_a = QAction("&Save", self)
+        save_a.setShortcut(QKeySequence.Save)
+        save_a.triggered.connect(self.save_model)
+        file_m.addAction(save_a)
+
+        save_as_a = QAction("Save &As...", self)
+        save_as_a.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_as_a.triggered.connect(self.save_model_as)
+        file_m.addAction(save_as_a)
+
+        file_m.addSeparator()
+
+        export_a = QAction("Export Generated C...", self)
+        export_a.triggered.connect(self.export_c)
+        file_m.addAction(export_a)
+
+        file_m.addSeparator()
+
+        quit_a = QAction("&Quit", self)
+        quit_a.setShortcut(QKeySequence.Quit)
+        quit_a.triggered.connect(self.close)
         file_m.addAction(quit_a)
 
         help_m = m.addMenu("&Help")
@@ -2804,6 +2885,14 @@ class MainWindow(QMainWindow):
             "See the docs/ folder for getting started.",
         ))
         help_m.addAction(about_a)
+
+    # --- window events ----------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        if self._confirm_discard():
+            event.accept()
+        else:
+            event.ignore()
 
     # --- actions ----------------------------------------------------------
 
@@ -2821,47 +2910,103 @@ class MainWindow(QMainWindow):
         self.scene.add_connection(b1.output_ports[0], b2.input_ports[0])
         self.scene.add_connection(b1.output_ports[0], b3.input_ports[0])
 
+    # ------------------------------------------------------------------
+    # Dirty / title helpers
+    # ------------------------------------------------------------------
+
+    def _mark_dirty(self, _=None) -> None:
+        if not self._is_dirty:
+            self._is_dirty = True
+            self._update_title()
+
+    def _set_clean(self, file_path: Optional[Path]) -> None:
+        self._current_file = file_path
+        self._is_dirty = False
+        self._update_title()
+
+    def _update_title(self) -> None:
+        name = self._current_file.name if self._current_file else "Untitled"
+        dirty = " \u2022" if self._is_dirty else ""   # bullet = unsaved
+        self.setWindowTitle(f"{name}{dirty} — {APP_NAME} {VERSION}")
+
+    def _confirm_discard(self) -> bool:
+        """Return True if it is safe to discard the current model.
+
+        If there are unsaved changes, prompts the user.  Returns False if the
+        user clicks Cancel.
+        """
+        if not self._is_dirty:
+            return True
+        reply = QMessageBox.question(
+            self, "Unsaved changes",
+            "The current diagram has unsaved changes.\n"
+            "Do you want to discard them?",
+            QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return reply == QMessageBox.Discard
+
+    # ------------------------------------------------------------------
+    # File actions
+    # ------------------------------------------------------------------
+
+    def new_model(self) -> None:
+        if not self._confirm_discard():
+            return
+        self.scene.load_from_dict({"blocks": [], "connections": []})
+        self.param_panel.clear_errors()
+        self._set_clean(None)
+        self.statusBar().showMessage("New diagram.")
+
     def save_model(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save Model", "", "JSON (*.json)")
+        """Save to the current file; fall back to Save As if no file is set."""
+        if self._current_file is None:
+            self.save_model_as()
+            return
+        self._write_model(self._current_file)
+
+    def save_model_as(self) -> None:
+        """Always prompt for a filename."""
+        default = str(self._current_file) if self._current_file else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Model As", default,
+            "STM32 Block Diagram (*.stmbd);;JSON (*.json);;All files (*)")
         if not path:
             return
+        self._write_model(Path(path))
+
+    def _write_model(self, path: Path) -> None:
         data = self.scene.to_model()
-        data["board"] = self.board
+        data["board"]   = self.board
         data["step_ms"] = self.step_ms
-        Path(path).write_text(json.dumps(data, indent=2))
-        self.statusBar().showMessage(f"Saved {path}")
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._set_clean(path)
+        self.statusBar().showMessage(f"Saved: {path}")
 
     def open_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open Model", "", "JSON (*.json)")
+        if not self._confirm_discard():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Model", "",
+            "STM32 Block Diagram (*.stmbd);;JSON (*.json);;All files (*)")
         if not path:
             return
-        data = json.loads(Path(path).read_text())
-        # Rebuild
-        self.scene.clear()
-        self.scene.__init__()
-        self.view.setScene(self.scene)
-        self.scene.block_selected.connect(self.param_panel.set_block)
-        self._clear_validation_errors()
-        positions = {}
-        for b in data["blocks"]:
-            item = self.scene.add_block_by_type(b["type"], QPointF(b["x"], b["y"]))
-            # keep id consistent
-            self.scene.blocks.pop(item.instance.block_id, None)
-            item.instance.block_id = b["id"]
-            item.instance.params.update(b.get("params", {}))
-            self.scene.blocks[b["id"]] = item
-            positions[b["id"]] = item
-        for c in data["connections"]:
-            src_item = positions[c["src_block"]]
-            dst_item = positions[c["dst_block"]]
-            src_port = next(p for p in src_item.output_ports if p.port_name == c["src_port"])
-            dst_port = next(p for p in dst_item.input_ports if p.port_name == c["dst_port"])
-            self.scene.add_connection(src_port, dst_port)
+        self._load_file(Path(path))
+
+    def _load_file(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QMessageBox.critical(self, "Open failed", str(exc))
+            return
+        self.scene.load_from_dict(data)
         self.board = data.get("board", "NUCLEO-F446RE")
         self.board_box.setCurrentText(self.board)
         self.step_ms = int(data.get("step_ms", 1))
         self.step_spin.setValue(self.step_ms)
-        self.statusBar().showMessage(f"Loaded {path}")
+        self._clear_validation_errors()
+        self._set_clean(path)
+        self.statusBar().showMessage(f"Opened: {path}")
 
     # --- simulate / export / build ---------------------------------------
 
