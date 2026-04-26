@@ -1525,7 +1525,7 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    # Extended to 39 blocks including all new group A-F blocks + LTI blocks.
+    # Extended to 53 blocks including all new group A-F blocks + LTI + batch-2 blocks.
     expected = {
         "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
         "Sum", "Product", "Constant",
@@ -1544,6 +1544,13 @@ def test_catalog_now_has_eight_block_types():
         "ADC", "DAC", "PWMOut", "TimerTick",
         # LTI blocks
         "StateSpace", "DiscreteStateSpace", "ZeroPoleGain",
+        # Batch 2 — new blocks
+        "Chirp", "RandomNumber", "FromWorkspace",
+        "MathFunction", "RoundingFunction", "Divide", "Bias", "Polynomial",
+        "RateLimiter", "Quantizer",
+        "DiscreteTransferFcn", "MovingAverage",
+        "Lookup2D",
+        "EncoderRead",
     }
     assert set(BLOCK_CATALOG.keys()) == expected
 

@@ -733,6 +733,256 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "Internally converts to rational TF then discretizes via bilinear (Tustin) transform."
         ),
     ),
+
+    # ---- Group G: New Sources -----------------------------------------------
+
+    "Chirp": BlockSpec(
+        type_name="Chirp",
+        display_name="Chirp Signal",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "amplitude":  ("1.0",  "Signal amplitude"),
+            "f_start":    ("1.0",  "Start frequency in Hz (at t=0)"),
+            "f_end":      ("10.0", "End frequency in Hz (at t=sweep_time)"),
+            "sweep_time": ("5.0",  "Duration of the sweep in seconds"),
+            "phase_deg":  ("0.0",  "Initial phase offset in degrees"),
+        },
+        description=(
+            "Linearly swept-frequency sine wave (chirp). "
+            "Frequency ramps from f_start to f_end over sweep_time seconds. "
+            "After sweep_time the frequency stays at f_end. "
+            "Useful for system identification and frequency response testing."
+        ),
+    ),
+
+    "RandomNumber": BlockSpec(
+        type_name="RandomNumber",
+        display_name="Random Number",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mean":     ("0.0", "Mean of the Gaussian distribution"),
+            "variance": ("1.0", "Variance (must be > 0)"),
+            "seed":     ("-1",  "RNG seed (-1 = non-deterministic)"),
+        },
+        description=(
+            "Generates Gaussian (normal) random noise at each time step. "
+            "In simulation uses numpy.random.normal. "
+            "On STM32 hardware, outputs constant 0 (no hardware RNG assumed); "
+            "replace with your platform RNG if available."
+        ),
+    ),
+
+    "FromWorkspace": BlockSpec(
+        type_name="FromWorkspace",
+        display_name="From Workspace",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "variable_name": ("u",   "Workspace variable name (must be a 1-D array)"),
+            "default":       ("0.0", "Value when index is out of range"),
+        },
+        description=(
+            "Reads signal samples from a workspace variable (must be a 1-D NumPy array). "
+            "Index k maps to variable[k]; if k is out of bounds, the default value is used. "
+            "On STM32, outputs the constant default value (arrays cannot live on-device)."
+        ),
+    ),
+
+    # ---- Group H: New Math --------------------------------------------------
+
+    "MathFunction": BlockSpec(
+        type_name="MathFunction",
+        display_name="Math Function",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("exp", "Operation: exp | log | log10 | square | reciprocal | pow10 | pow2"),
+            "exponent": ("2.0", "Exponent for 'pow' operations (unused by others)"),
+        },
+        description=(
+            "Applies a mathematical function to the input: "
+            "exp (e^u), log (ln u), log10 (log base 10), "
+            "square (u^2), reciprocal (1/u), pow10 (10^u), pow2 (2^u). "
+            "log/log10/reciprocal protect against non-positive inputs (output 0)."
+        ),
+    ),
+
+    "RoundingFunction": BlockSpec(
+        type_name="RoundingFunction",
+        display_name="Rounding Function",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("round", "Operation: floor | ceil | round | fix"),
+        },
+        description=(
+            "Applies a rounding operation: "
+            "floor (round toward -inf), ceil (round toward +inf), "
+            "round (round to nearest integer), fix (truncate toward zero)."
+        ),
+    ),
+
+    "Divide": BlockSpec(
+        type_name="Divide",
+        display_name="Divide",
+        color="#e67e22",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "eps": ("1e-10", "Minimum |denominator| before output is forced to 0"),
+        },
+        description=(
+            "y = u0 / u1. "
+            "If |u1| < eps, output is 0 to avoid divide-by-zero. "
+            "Tune eps to match your signal magnitudes."
+        ),
+    ),
+
+    "Bias": BlockSpec(
+        type_name="Bias",
+        display_name="Bias",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "bias": ("0.0", "Constant offset added to input: y = u + bias"),
+        },
+        description="Adds a constant offset to the input: y = u + bias.",
+    ),
+
+    "Polynomial": BlockSpec(
+        type_name="Polynomial",
+        display_name="Polynomial",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "coefficients": ("1 0", "Polynomial coefficients, highest power first (like numpy.polyval). "
+                                    "'1 0' = u, '1 2 1' = u^2+2u+1."),
+        },
+        description=(
+            "Evaluates a polynomial in u using Horner's method: "
+            "y = c[0]*u^n + c[1]*u^(n-1) + ... + c[n]. "
+            "Enter coefficients space-separated, highest power first."
+        ),
+    ),
+
+    # ---- Group I: New Nonlinear ---------------------------------------------
+
+    "RateLimiter": BlockSpec(
+        type_name="RateLimiter",
+        display_name="Rate Limiter",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "rising_limit":  ("1.0",  "Maximum rate of increase per second (must be > 0)"),
+            "falling_limit": ("-1.0", "Maximum rate of decrease per second (must be < 0)"),
+            "initial_condition": ("0.0", "Initial output value"),
+        },
+        description=(
+            "Limits the rate of change of the input signal. "
+            "rising_limit (> 0) caps how fast the output can increase per second. "
+            "falling_limit (< 0) caps how fast it can decrease per second."
+        ),
+    ),
+
+    "Quantizer": BlockSpec(
+        type_name="Quantizer",
+        display_name="Quantizer",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "interval": ("0.1", "Quantization interval (must be > 0); y = round(u/interval)*interval"),
+        },
+        description=(
+            "Rounds the input to the nearest multiple of interval. "
+            "Useful for modeling ADC quantization, encoder resolution, etc."
+        ),
+    ),
+
+    # ---- Group J: New Discrete ----------------------------------------------
+
+    "DiscreteTransferFcn": BlockSpec(
+        type_name="DiscreteTransferFcn",
+        display_name="Discrete Transfer Fcn",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "numerator":   ("1",    "z-domain numerator coefficients, highest power first (e.g. '1 0.5')"),
+            "denominator": ("1 -1", "z-domain denominator coefficients, highest power first (e.g. '1 -0.9')"),
+        },
+        description=(
+            "Discrete-time transfer function: H(z) = B(z)/A(z). "
+            "Enter polynomials as space-separated coefficients, highest power first. "
+            "Unlike Transfer Fcn, no bilinear conversion is applied — "
+            "the coefficients are used directly in a Direct-Form-II-Transposed IIR filter."
+        ),
+    ),
+
+    "MovingAverage": BlockSpec(
+        type_name="MovingAverage",
+        display_name="Moving Average",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("10", "Number of samples in the moving average window (>= 1)"),
+        },
+        description=(
+            "Computes the N-sample moving average of the input. "
+            "window=1 is a pass-through. "
+            "On STM32, implemented with a circular buffer."
+        ),
+    ),
+
+    # ---- Group K: New Lookup ------------------------------------------------
+
+    "Lookup2D": BlockSpec(
+        type_name="Lookup2D",
+        display_name="Lookup 2-D",
+        color="#f39c12",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "row_breakpoints": ("0 1",      "Row breakpoints, space-separated, strictly increasing"),
+            "col_breakpoints": ("0 1",      "Column breakpoints, space-separated, strictly increasing"),
+            "table":           ("0 1; 1 2", "Table data, rows separated by ';', cols by spaces. "
+                                            "Dimensions: len(row_bp) x len(col_bp)"),
+        },
+        description=(
+            "2-D lookup table with bilinear interpolation. "
+            "u0 indexes rows, u1 indexes columns. "
+            "Clamps to boundary for out-of-range inputs."
+        ),
+    ),
+
+    # ---- Group L: New STM32 HAL ---------------------------------------------
+
+    "EncoderRead": BlockSpec(
+        type_name="EncoderRead",
+        display_name="Encoder Read",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "timer":          ("TIM4",     "HAL timer handle name configured in encoder mode (e.g. TIM4)"),
+            "counts_per_rev": ("1000",     "Encoder counts per full revolution (PPR * 4 for quadrature)"),
+            "mode":           ("position", "Output mode: 'position' (radians) or 'velocity' (rad/s)"),
+            "sim_value":      ("0.0",      "Constant simulation output value"),
+        },
+        description=(
+            "Reads a quadrature encoder via TIM in encoder mode. "
+            "mode='position': y = counter / counts_per_rev * 2*pi (radians, wraps). "
+            "mode='velocity': y = delta_counts / counts_per_rev * 2*pi / step_s (rad/s). "
+            "Set the timer up in CubeMX as Encoder Mode (TI1TI2)."
+        ),
+    ),
 }
 
 
@@ -2129,6 +2379,145 @@ def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
         elif g == 0.0:
             _bad("gain", "E002", "gain must not be zero")
 
+    # ---- Chirp --------------------------------------------------------------
+    elif btype == "Chirp":
+        for pname in ("amplitude", "f_start", "f_end", "sweep_time", "phase_deg"):
+            if _num(pname, "1.0") is None:
+                _bad(pname, "E001", "Must be a valid number")
+        f0 = _num("f_start", "1.0")
+        f1 = _num("f_end", "10.0")
+        ts = _num("sweep_time", "5.0")
+        if f0 is not None and f0 <= 0: _bad("f_start", "E002", "f_start must be > 0 Hz")
+        if f1 is not None and f1 <= 0: _bad("f_end",   "E002", "f_end must be > 0 Hz")
+        if ts is not None and ts <= 0: _bad("sweep_time", "E002", "sweep_time must be > 0 s")
+
+    # ---- RandomNumber -------------------------------------------------------
+    elif btype == "RandomNumber":
+        if _num("mean", "0.0") is None: _bad("mean", "E001", "Must be a valid number")
+        v = _num("variance", "1.0")
+        if v is None:  _bad("variance", "E001", "Must be a valid number")
+        elif v <= 0:   _bad("variance", "E002", "variance must be > 0")
+        s = _num("seed", "-1")
+        if s is None:  _bad("seed", "E001", "seed must be an integer or -1")
+
+    # ---- FromWorkspace ------------------------------------------------------
+    elif btype == "FromWorkspace":
+        vn = p.get("variable_name", "u").strip()
+        if not vn: _bad("variable_name", "E001", "Variable name cannot be empty")
+        elif not vn.isidentifier(): _bad("variable_name", "E005", f"'{vn}' is not a valid Python identifier")
+        if _num("default", "0.0") is None: _bad("default", "E001", "default must be a valid number")
+
+    # ---- MathFunction -------------------------------------------------------
+    elif btype == "MathFunction":
+        fn = p.get("function", "exp").strip().lower()
+        allowed = ("exp", "log", "log10", "square", "reciprocal", "pow10", "pow2")
+        if fn not in allowed:
+            _bad("function", "E003", f"function must be one of: {', '.join(allowed)}")
+
+    # ---- RoundingFunction ---------------------------------------------------
+    elif btype == "RoundingFunction":
+        fn = p.get("function", "round").strip().lower()
+        if fn not in ("floor", "ceil", "round", "fix"):
+            _bad("function", "E003", "function must be: floor, ceil, round, or fix")
+
+    # ---- Divide -------------------------------------------------------------
+    elif btype == "Divide":
+        e = _num("eps", "1e-10")
+        if e is None: _bad("eps", "E001", "eps must be a valid number")
+        elif e <= 0:  _bad("eps", "E002", "eps must be > 0")
+
+    # ---- Bias ---------------------------------------------------------------
+    elif btype == "Bias":
+        if _num("bias", "0.0") is None: _bad("bias", "E001", "Must be a valid number")
+
+    # ---- Polynomial ---------------------------------------------------------
+    elif btype == "Polynomial":
+        c_str = p.get("coefficients", "1 0").strip()
+        if not c_str: _bad("coefficients", "E001", "Must have at least one coefficient")
+        else:
+            try: [float(x) for x in c_str.split()]
+            except ValueError: _bad("coefficients", "E001", "All coefficients must be valid numbers")
+
+    # ---- RateLimiter --------------------------------------------------------
+    elif btype == "RateLimiter":
+        rl = _num("rising_limit",  "1.0")
+        fl = _num("falling_limit", "-1.0")
+        if rl is None: _bad("rising_limit",  "E001", "Must be a valid number")
+        elif rl <= 0:  _bad("rising_limit",  "E002", "rising_limit must be > 0")
+        if fl is None: _bad("falling_limit", "E001", "Must be a valid number")
+        elif fl >= 0:  _bad("falling_limit", "E002", "falling_limit must be < 0")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- Quantizer ----------------------------------------------------------
+    elif btype == "Quantizer":
+        q = _num("interval", "0.1")
+        if q is None: _bad("interval", "E001", "Must be a valid number")
+        elif q <= 0:  _bad("interval", "E002", "interval must be > 0")
+
+    # ---- DiscreteTransferFcn ------------------------------------------------
+    elif btype == "DiscreteTransferFcn":
+        num_str = p.get("numerator",   "1")
+        den_str = p.get("denominator", "1 -1")
+        num_c: List[float] = []
+        den_c: List[float] = []
+        try:
+            num_c = [float(x) for x in num_str.split()]
+            if not num_c:
+                _bad("numerator", "E001", "Must contain at least one coefficient")
+        except ValueError:
+            _bad("numerator", "E001", "Coefficients must be space-separated numbers")
+        try:
+            den_c = [float(x) for x in den_str.split()]
+            if not den_c:
+                _bad("denominator", "E001", "Must contain at least one coefficient")
+            elif den_c[0] == 0.0:
+                _bad("denominator", "E001", "Leading denominator coefficient must be non-zero")
+        except ValueError:
+            _bad("denominator", "E001", "Coefficients must be space-separated numbers")
+        if num_c and den_c and len(num_c) > len(den_c):
+            _bad("numerator", "E006",
+                 f"Improper transfer function: numerator order {len(num_c)-1} "
+                 f"> denominator order {len(den_c)-1}")
+
+    # ---- MovingAverage ------------------------------------------------------
+    elif btype == "MovingAverage":
+        w = _num("window", "10")
+        if w is None or int(w) < 1: _bad("window", "E002", "window must be >= 1")
+
+    # ---- Lookup2D -----------------------------------------------------------
+    elif btype == "Lookup2D":
+        for pname in ("row_breakpoints", "col_breakpoints"):
+            s = p.get(pname, "")
+            try:
+                vals = [float(x) for x in s.split()]
+                if len(vals) < 2: _bad(pname, "E002", "Need at least 2 breakpoints")
+                elif any(vals[i] >= vals[i+1] for i in range(len(vals)-1)):
+                    _bad(pname, "E002", "Breakpoints must be strictly increasing")
+            except ValueError:
+                _bad(pname, "E001", "Breakpoints must be space-separated numbers")
+        try:
+            rbp = [float(x) for x in p.get("row_breakpoints", "0 1").split()]
+            cbp = [float(x) for x in p.get("col_breakpoints", "0 1").split()]
+            rows = [[float(v) for v in row.split()] for row in p.get("table", "0 1; 1 2").split(";") if row.strip()]
+            if len(rows) != len(rbp):
+                _bad("table", "E002", f"Table has {len(rows)} rows but row_breakpoints has {len(rbp)} points")
+            elif any(len(r) != len(cbp) for r in rows):
+                _bad("table", "E002", f"Each table row must have {len(cbp)} columns (matching col_breakpoints)")
+        except ValueError:
+            _bad("table", "E001", "Table values must be numbers; rows separated by ';'")
+
+    # ---- EncoderRead --------------------------------------------------------
+    elif btype == "EncoderRead":
+        t_str = p.get("timer", "").strip()
+        if not t_str: _bad("timer", "E003", "timer cannot be empty (e.g. TIM4)")
+        cpr = _num("counts_per_rev", "1000")
+        if cpr is None: _bad("counts_per_rev", "E001", "Must be a valid number")
+        elif cpr <= 0:  _bad("counts_per_rev", "E002", "counts_per_rev must be > 0")
+        mode = p.get("mode", "position").strip().lower()
+        if mode not in ("position", "velocity"): _bad("mode", "E003", "mode must be 'position' or 'velocity'")
+        if _num("sim_value", "0.0") is None: _bad("sim_value", "E001", "Must be a valid number")
+
     return errors
 
 
@@ -2265,6 +2654,44 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             scale = pval(b["params"].get("scale", "0.001"))
             # t is in seconds; HAL_GetTick is ms, so sim output = t * 1000 * scale
             outs[(b["id"], "y")] = t * 1000.0 * scale
+
+        elif b["type"] == "Chirp":
+            A   = pval(b["params"].get("amplitude",  "1.0"))
+            f0  = pval(b["params"].get("f_start",    "1.0"))
+            f1  = pval(b["params"].get("f_end",     "10.0"))
+            tsw = pval(b["params"].get("sweep_time", "5.0"))
+            ph  = pval(b["params"].get("phase_deg",  "0.0")) * math.pi / 180.0
+            t_eff = np.minimum(t, tsw)
+            phi   = 2.0 * math.pi * (f0 * t_eff + (f1 - f0) * t_eff**2 / (2.0 * tsw))
+            outs[(b["id"], "y")] = A * np.sin(phi + ph)
+
+        elif b["type"] == "RandomNumber":
+            mean = pval(b["params"].get("mean",     "0.0"))
+            var  = pval(b["params"].get("variance", "1.0"))
+            seed = b["params"].get("seed", "-1").strip()
+            try:
+                s = int(float(seed))
+            except ValueError:
+                s = -1
+            rng = np.random.default_rng(None if s < 0 else s)
+            outs[(b["id"], "y")] = rng.normal(mean, math.sqrt(max(var, 0.0)), n)
+
+        elif b["type"] == "FromWorkspace":
+            vname   = b["params"].get("variable_name", "u").strip()
+            default = pval(b["params"].get("default", "0.0"))
+            arr = WORKSPACE.globals.get(vname)
+            if arr is None:
+                outs[(b["id"], "y")] = np.full(n, default)
+            else:
+                arr = np.asarray(arr, dtype=float).flatten()
+                out = np.full(n, default)
+                m = min(n, len(arr))
+                out[:m] = arr[:m]
+                outs[(b["id"], "y")] = out
+
+        elif b["type"] == "EncoderRead":
+            sim_val = pval(b["params"].get("sim_value", "0.0"))
+            outs[(b["id"], "y")] = np.full(n, sim_val)
 
     # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
@@ -2560,6 +2987,126 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             except Exception:
                 y = np.zeros(n)
             outs[(bid, "y")] = y
+
+        elif b["type"] == "MathFunction":
+            u_arr = _input("u")
+            fn    = b["params"].get("function", "exp").strip().lower()
+            if   fn == "exp":        y = np.exp(u_arr)
+            elif fn == "log":        y = np.where(u_arr > 0, np.log(u_arr), 0.0)
+            elif fn == "log10":      y = np.where(u_arr > 0, np.log10(u_arr), 0.0)
+            elif fn == "square":     y = u_arr ** 2
+            elif fn == "reciprocal": y = np.where(np.abs(u_arr) > 1e-12, 1.0 / u_arr, 0.0)
+            elif fn == "pow10":      y = 10.0 ** u_arr
+            elif fn == "pow2":       y = 2.0 ** u_arr
+            else:                    y = np.zeros(n)
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "RoundingFunction":
+            u_arr = _input("u")
+            fn = b["params"].get("function", "round").strip().lower()
+            if   fn == "floor": y = np.floor(u_arr)
+            elif fn == "ceil":  y = np.ceil(u_arr)
+            elif fn == "round": y = np.round(u_arr)
+            elif fn == "fix":   y = np.fix(u_arr)
+            else:               y = np.zeros(n)
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "Divide":
+            u0  = _input("u0")
+            u1  = _input("u1")
+            eps = pval(b["params"].get("eps", "1e-10"))
+            outs[(bid, "y")] = np.where(np.abs(u1) < eps, 0.0, u0 / u1)
+
+        elif b["type"] == "Bias":
+            outs[(bid, "y")] = _input("u") + pval(b["params"].get("bias", "0.0"))
+
+        elif b["type"] == "Polynomial":
+            u_arr  = _input("u")
+            c_str  = b["params"].get("coefficients", "1 0")
+            try:
+                coeffs = [float(x) for x in c_str.split()]
+                outs[(bid, "y")] = np.polyval(coeffs, u_arr)
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
+
+        elif b["type"] == "RateLimiter":
+            u_arr = _input("u")
+            rl    = pval(b["params"].get("rising_limit",      "1.0"))
+            fl    = pval(b["params"].get("falling_limit",    "-1.0"))
+            ic    = pval(b["params"].get("initial_condition", "0.0"))
+            y = np.empty(n)
+            prev = ic
+            for k in range(n):
+                delta = u_arr[k] - prev
+                delta = max(fl * step_s, min(rl * step_s, delta))
+                prev  = prev + delta
+                y[k]  = prev
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "Quantizer":
+            u_arr    = _input("u")
+            interval = pval(b["params"].get("interval", "0.1"))
+            if interval <= 0:
+                interval = 0.1
+            outs[(bid, "y")] = np.round(u_arr / interval) * interval
+
+        elif b["type"] == "DiscreteTransferFcn":
+            u_arr   = _input("u")
+            num_str = b["params"].get("numerator",   "1")
+            den_str = b["params"].get("denominator", "1 -1")
+            try:
+                bz = np.array([float(x) for x in num_str.split()])
+                az = np.array([float(x) for x in den_str.split()])
+                az = az / az[0]
+                if len(bz) < len(az):
+                    bz = np.concatenate([np.zeros(len(az) - len(bz)), bz])
+                try:
+                    from scipy.signal import lfilter
+                    y = lfilter(bz, az, u_arr)
+                except ImportError:
+                    y = np.zeros(n)
+                    order = len(az) - 1
+                    s_st = np.zeros(order)
+                    for k in range(n):
+                        yk = bz[0] * u_arr[k] + (s_st[0] if order else 0.0)
+                        for j in range(order - 1):
+                            s_st[j] = bz[j+1]*u_arr[k] - az[j+1]*yk + s_st[j+1]
+                        if order:
+                            s_st[order-1] = bz[order]*u_arr[k] - az[order]*yk
+                        y[k] = yk
+                outs[(bid, "y")] = y
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
+
+        elif b["type"] == "MovingAverage":
+            u_arr = _input("u")
+            win   = max(1, int(round(pval(b["params"].get("window", "10")))))
+            y = np.convolve(u_arr, np.ones(win) / win, mode='full')[:n]
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "Lookup2D":
+            u0_arr = _input("u0")
+            u1_arr = _input("u1")
+            rbp_str = b["params"].get("row_breakpoints", "0 1")
+            cbp_str = b["params"].get("col_breakpoints", "0 1")
+            tbl_str = b["params"].get("table", "0 1; 1 2")
+            try:
+                rbp = np.array([float(x) for x in rbp_str.split()])
+                cbp = np.array([float(x) for x in cbp_str.split()])
+                rows = [[float(v) for v in row.split()] for row in tbl_str.split(";") if row.strip()]
+                tbl  = np.array(rows, dtype=float)
+                y = np.empty(n)
+                for k in range(n):
+                    r = float(np.interp(u0_arr[k], rbp, np.arange(len(rbp))))
+                    c = float(np.interp(u1_arr[k], cbp, np.arange(len(cbp))))
+                    ri = int(np.clip(int(r), 0, len(rbp)-2))
+                    ci = int(np.clip(int(c), 0, len(cbp)-2))
+                    fr = r - ri; fc = c - ci
+                    y[k] = (tbl[ri,ci]*(1-fr)*(1-fc) + tbl[ri+1,ci]*fr*(1-fc) +
+                            tbl[ri,ci+1]*(1-fr)*fc    + tbl[ri+1,ci+1]*fr*fc)
+                outs[(bid, "y")] = y
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
 
     # ToWorkspace: capture signal into the Python workspace and expose it to
     # the Simulate Scope tab so the user can see what was saved.
