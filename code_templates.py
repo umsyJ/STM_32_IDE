@@ -267,6 +267,38 @@ def _emit_decls(blocks: List[dict]) -> str:
                 ic_init = ", ".join([f"{ic:.10f}f"] * delay)
                 decls.append(f"static float _td_buf_{b['id']}[{delay}] = {{{ic_init}}};")
                 decls.append(f"static uint32_t _td_idx_{b['id']} = 0;")
+        # Group Q: DSP blocks
+        elif b["type"] == "FIRFilter":
+            c_str  = b["params"].get("coefficients", "0.25 0.25 0.25 0.25")
+            nt     = max(1, len(c_str.split()))
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _fir_buf_{b['id']}[{nt}] = {{0}};")
+            decls.append(f"static uint32_t _fir_idx_{b['id']} = 0;")
+        elif b["type"] == "BiquadFilter":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _bq_w1_{b['id']} = 0.0f;")
+            decls.append(f"static float _bq_w2_{b['id']} = 0.0f;")
+        elif b["type"] == "RunningRMS":
+            w = max(1, int(float(b["params"].get("window", "100"))))
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _rms_buf_{b['id']}[{w}] = {{0}};")
+            decls.append(f"static uint32_t _rms_idx_{b['id']} = 0;")
+            decls.append(f"static float _rms_sum_{b['id']} = 0.0f;")
+        elif b["type"] == "MedianFilter":
+            w = max(1, min(15, int(float(b["params"].get("window", "5")))))
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _med_buf_{b['id']}[{w}] = {{0}};")
+            decls.append(f"static uint32_t _med_cnt_{b['id']} = 0;")
+            decls.append(f"static uint32_t _med_idx_{b['id']} = 0;")
+        elif b["type"] == "NCO":
+            phi0 = float(b["params"].get("initial_phase", "0.0")) * 3.14159265 / 180.0
+            decls.append(f"static float {_sig_var(b['id'],'sin_out')} = 0.0f;")
+            decls.append(f"static float {_sig_var(b['id'],'cos_out')} = 0.0f;")
+            decls.append(f"static float _nco_phase_{b['id']} = {phi0:.10f}f;")
+        elif b["type"] == "PeakDetector":
+            ic = float(b["params"].get("initial", "0.0"))
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _peak_hold_{b['id']} = {ic:.10f}f;")
         # GpioOut, Scope, ToWorkspace, DAC, PWMOut, UARTSend, I2CWrite: no signal output
     return "\n".join(decls)
 
@@ -1229,6 +1261,106 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
             lines.append(f"        uint8_t _buf_{bid}[2] = {{(uint8_t)(_raw >> 8), (uint8_t)(_raw & 0xFF)}};")
             lines.append(f"        HAL_I2C_Mem_Write(&{handle}, {dev_shifted}, {reg}, I2C_MEMADD_SIZE_8BIT,")
             lines.append(f"                          _buf_{bid}, {dbytes}U, 10);")
+            lines.append(f"    }}")
+
+        # ---- Group Q: DSP --------------------------------------------------
+
+        elif t == "FIRFilter":
+            u_expr = get_input(bid, "u")
+            c_str  = p.get("coefficients", "0.25 0.25 0.25 0.25")
+            try:
+                coeffs = [float(x) for x in c_str.split()]
+                nt = len(coeffs)
+                lines.append(f"    /* block {bid}: FIRFilter taps={nt} */")
+                lines.append(f"    {{")
+                lines.append(f"        _fir_buf_{bid}[_fir_idx_{bid}] = {u_expr};")
+                lines.append(f"        float _fir_y_{bid} = 0.0f;")
+                for i, c in enumerate(coeffs):
+                    lines.append(
+                        f"        _fir_y_{bid} += {c:.10f}f * "
+                        f"_fir_buf_{bid}[(_fir_idx_{bid} + {nt} - {i}) % {nt}u];")
+                lines.append(f"        _fir_idx_{bid} = (_fir_idx_{bid} + 1) % {nt}u;")
+                lines.append(f"        {_sig_var(bid,'y')} = _fir_y_{bid};")
+                lines.append(f"    }}")
+            except Exception as exc:
+                lines.append(f"    /* block {bid}: FIRFilter codegen error: {exc} */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;")
+
+        elif t == "BiquadFilter":
+            u_expr = get_input(bid, "u")
+            b0 = float(p.get("b0", "1.0"))
+            b1 = float(p.get("b1", "0.0"))
+            b2 = float(p.get("b2", "0.0"))
+            a1 = float(p.get("a1", "0.0"))
+            a2 = float(p.get("a2", "0.0"))
+            lines.append(f"    /* block {bid}: BiquadFilter Direct Form II */")
+            lines.append(f"    {{")
+            lines.append(f"        float _w0 = {u_expr} - {a1:.10f}f * _bq_w1_{bid} - {a2:.10f}f * _bq_w2_{bid};")
+            lines.append(f"        {_sig_var(bid,'y')} = {b0:.10f}f*_w0 + {b1:.10f}f*_bq_w1_{bid} + {b2:.10f}f*_bq_w2_{bid};")
+            lines.append(f"        _bq_w2_{bid} = _bq_w1_{bid};")
+            lines.append(f"        _bq_w1_{bid} = _w0;")
+            lines.append(f"    }}")
+
+        elif t == "RunningRMS":
+            u_expr = get_input(bid, "u")
+            w = max(1, int(float(p.get("window", "100"))))
+            lines.append(f"    /* block {bid}: RunningRMS window={w} */")
+            lines.append(f"    {{")
+            lines.append(f"        float _usq = ({u_expr}) * ({u_expr});")
+            lines.append(f"        _rms_sum_{bid} -= _rms_buf_{bid}[_rms_idx_{bid}];")
+            lines.append(f"        _rms_buf_{bid}[_rms_idx_{bid}] = _usq;")
+            lines.append(f"        _rms_sum_{bid} += _usq;")
+            lines.append(f"        _rms_idx_{bid} = (_rms_idx_{bid} + 1) % {w}u;")
+            lines.append(f"        {_sig_var(bid,'y')} = sqrtf(_rms_sum_{bid} / {w}.0f);")
+            lines.append(f"    }}")
+
+        elif t == "MedianFilter":
+            u_expr = get_input(bid, "u")
+            w = max(1, min(15, int(float(p.get("window", "5")))))
+            lines.append(f"    /* block {bid}: MedianFilter window={w} */")
+            lines.append(f"    {{")
+            lines.append(f"        _med_buf_{bid}[_med_idx_{bid}] = {u_expr};")
+            lines.append(f"        _med_idx_{bid} = (_med_idx_{bid} + 1) % {w}u;")
+            lines.append(f"        if (_med_cnt_{bid} < {w}u) _med_cnt_{bid}++;")
+            lines.append(f"        /* insertion sort copy */")
+            lines.append(f"        float _sorted_{bid}[{w}];")
+            lines.append(f"        uint32_t _nc = _med_cnt_{bid};")
+            lines.append(f"        for (uint32_t _i = 0; _i < _nc; _i++) _sorted_{bid}[_i] = _med_buf_{bid}[_i];")
+            lines.append(f"        for (uint32_t _i = 1; _i < _nc; _i++) {{")
+            lines.append(f"            float _key = _sorted_{bid}[_i]; int32_t _j = (int32_t)_i - 1;")
+            lines.append(f"            while (_j >= 0 && _sorted_{bid}[_j] > _key) {{")
+            lines.append(f"                _sorted_{bid}[_j+1] = _sorted_{bid}[_j]; _j--;")
+            lines.append(f"            }}")
+            lines.append(f"            _sorted_{bid}[_j+1] = _key;")
+            lines.append(f"        }}")
+            lines.append(f"        {_sig_var(bid,'y')} = _sorted_{bid}[_nc / 2];")
+            lines.append(f"    }}")
+
+        elif t == "NCO":
+            freq_expr = get_input(bid, "freq")
+            amp  = float(p.get("amplitude", "1.0"))
+            lines.append(f"    /* block {bid}: NCO */")
+            lines.append(f"    {{")
+            lines.append(f"        {_sig_var(bid,'sin_out')} = {amp:.10f}f * sinf(_nco_phase_{bid});")
+            lines.append(f"        {_sig_var(bid,'cos_out')} = {amp:.10f}f * cosf(_nco_phase_{bid});")
+            lines.append(f"        _nco_phase_{bid} += 6.2831853f * ({freq_expr}) * {dt_s:.10f}f;")
+            lines.append(f"        /* Wrap phase to [-pi, pi] to avoid float overflow */")
+            lines.append(f"        while (_nco_phase_{bid} >  3.14159265f) _nco_phase_{bid} -= 6.2831853f;")
+            lines.append(f"        while (_nco_phase_{bid} < -3.14159265f) _nco_phase_{bid} += 6.2831853f;")
+            lines.append(f"    }}")
+
+        elif t == "PeakDetector":
+            u_expr = get_input(bid, "u")
+            mode   = p.get("mode", "max").strip().lower()
+            decay  = float(p.get("decay_rate", "0.0"))
+            use_abs = (mode == "abs_max")
+            lines.append(f"    /* block {bid}: PeakDetector mode={mode} */")
+            lines.append(f"    {{")
+            val_expr = f"fabsf({u_expr})" if use_abs else f"({u_expr})"
+            lines.append(f"        float _val = {val_expr};")
+            lines.append(f"        _peak_hold_{bid} -= {decay:.10f}f * {dt_s:.10f}f;")
+            lines.append(f"        if (_val > _peak_hold_{bid}) _peak_hold_{bid} = _val;")
+            lines.append(f"        {_sig_var(bid,'y')} = _peak_hold_{bid};")
             lines.append(f"    }}")
 
     return "\n".join(lines), streamed

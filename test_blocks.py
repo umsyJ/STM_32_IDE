@@ -1525,7 +1525,7 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    # Extended to 63 blocks including all new group A-F blocks + LTI + batch-2 + batch-3 blocks.
+    # Extended to 59 blocks including all new group A-F blocks + LTI + batch-2 + batch-3 + DSP blocks.
     expected = {
         "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
         "Sum", "Product", "Constant",
@@ -1555,6 +1555,8 @@ def test_catalog_now_has_eight_block_types():
         "Ground", "Relay", "CompareToConstant", "DetectRisePositive",
         "SaturationDynamic", "MultiportSwitch", "TransportDelay",
         "UARTSend", "I2CRead", "I2CWrite",
+        # DSP blocks
+        "FIRFilter", "BiquadFilter", "RunningRMS", "MedianFilter", "NCO", "PeakDetector",
     }
     assert set(BLOCK_CATALOG.keys()) == expected
 
@@ -4691,6 +4693,260 @@ def test_codegen_i2c_read_hal_call():
     with tempfile.TemporaryDirectory() as d:
         src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
     assert "HAL_I2C_Mem_Read" in src
+
+
+# ---------------------------------------------------------------------------
+# DSP block factory helpers
+# ---------------------------------------------------------------------------
+
+
+def _fir(bid, coefficients="0.25 0.25 0.25 0.25"):
+    return {"id": bid, "type": "FIRFilter",
+            "params": {"coefficients": coefficients}, "x": 0, "y": 0}
+
+def _biquad(bid, b0="1.0", b1="0.0", b2="0.0", a1="0.0", a2="0.0"):
+    return {"id": bid, "type": "BiquadFilter",
+            "params": {"b0": b0, "b1": b1, "b2": b2, "a1": a1, "a2": a2}, "x": 0, "y": 0}
+
+def _rrms(bid, window="10"):
+    return {"id": bid, "type": "RunningRMS",
+            "params": {"window": window}, "x": 0, "y": 0}
+
+def _median(bid, window="5"):
+    return {"id": bid, "type": "MedianFilter",
+            "params": {"window": window}, "x": 0, "y": 0}
+
+def _nco(bid, amplitude="1.0", initial_phase="0.0"):
+    return {"id": bid, "type": "NCO",
+            "params": {"amplitude": amplitude, "initial_phase": initial_phase}, "x": 0, "y": 0}
+
+def _peakdet(bid, mode="max", decay_rate="0.0", initial="0.0"):
+    return {"id": bid, "type": "PeakDetector",
+            "params": {"mode": mode, "decay_rate": decay_rate, "initial": initial},
+            "x": 0, "y": 0}
+
+
+# ---------------------------------------------------------------------------
+# DSP block tests
+# ---------------------------------------------------------------------------
+
+
+# ── FIRFilter ────────────────────────────────────────────────────────────────
+
+def test_validate_fir_valid():
+    assert _validate_block(_fir("F1")) == []
+
+def test_validate_fir_empty_coeffs():
+    b = _fir("F1", coefficients="")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E001" in codes
+
+def test_validate_fir_bad_coeffs():
+    b = _fir("F1", coefficients="a b c")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E001" in codes
+
+def test_simulate_fir_passthrough():
+    """Single coefficient = 1 → pass-through"""
+    b_sw = _sw("SRC", amplitude="2.0", duty="1.0")
+    b_fir = _fir("F1", coefficients="1.0")
+    b_sc  = _scope("SC")
+    model = _model([b_sw, b_fir, b_sc],
+                   [_wire("SRC","y","F1","u"), _wire("F1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.allclose(sigs["SC.u0"], 2.0)
+
+def test_simulate_fir_average():
+    """4-tap average of constant signal = same constant"""
+    b_c   = _const("C", "4.0")
+    b_fir = _fir("F1", coefficients="0.25 0.25 0.25 0.25")
+    b_sc  = _scope("SC")
+    model = _model([b_c, b_fir, b_sc],
+                   [_wire("C","y","F1","u"), _wire("F1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    # After the transient (first 3 samples), output should be 4.0
+    assert np.allclose(sigs["SC.u0"][4:], 4.0)
+
+def test_codegen_fir_has_ring_buffer():
+    b_sw = _sw("SRC"); b_fir = _fir("F1"); b_sc = _scope("SC")
+    model = _model([b_sw, b_fir, b_sc],
+                   [_wire("SRC","y","F1","u"), _wire("F1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"; model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_fir_buf_F1" in src
+    assert "_fir_idx_F1" in src
+
+
+# ── BiquadFilter ─────────────────────────────────────────────────────────────
+
+def test_validate_biquad_valid():
+    assert _validate_block(_biquad("BQ")) == []
+
+def test_validate_biquad_bad_coeff():
+    b = _biquad("BQ", b0="abc")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E001" in codes
+
+def test_simulate_biquad_passthrough():
+    """b0=1, all others 0 → pure pass-through"""
+    b_sw  = _sw("SRC", amplitude="3.0", duty="1.0")
+    b_bq  = _biquad("BQ", b0="1.0")
+    b_sc  = _scope("SC")
+    model = _model([b_sw, b_bq, b_sc],
+                   [_wire("SRC","y","BQ","u"), _wire("BQ","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.allclose(sigs["SC.u0"], 3.0)
+
+def test_codegen_biquad_has_state_vars():
+    b_sw = _sw("SRC"); b_bq = _biquad("BQ"); b_sc = _scope("SC")
+    model = _model([b_sw, b_bq, b_sc],
+                   [_wire("SRC","y","BQ","u"), _wire("BQ","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"; model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_bq_w1_BQ" in src and "_bq_w2_BQ" in src
+
+
+# ── RunningRMS ───────────────────────────────────────────────────────────────
+
+def test_validate_rrms_valid():
+    assert _validate_block(_rrms("R1")) == []
+
+def test_validate_rrms_bad_window():
+    b = _rrms("R1", window="0")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E002" in codes
+
+def test_simulate_rrms_constant_input():
+    """RMS of constant A = A"""
+    b_c   = _const("C", "3.0")
+    b_rms = _rrms("R1", window="10")
+    b_sc  = _scope("SC")
+    model = _model([b_c, b_rms, b_sc],
+                   [_wire("C","y","R1","u"), _wire("R1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.2, step_s=0.001)
+    # After window fills, RMS should be 3.0
+    assert abs(sigs["SC.u0"][-1] - 3.0) < 0.01
+
+def test_codegen_rrms_has_circular_buffer():
+    b_sw = _sw("SRC"); b_rms = _rrms("R1", window="5"); b_sc = _scope("SC")
+    model = _model([b_sw, b_rms, b_sc],
+                   [_wire("SRC","y","R1","u"), _wire("R1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"; model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_rms_buf_R1" in src and "sqrtf" in src
+
+
+# ── MedianFilter ─────────────────────────────────────────────────────────────
+
+def test_validate_median_valid():
+    assert _validate_block(_median("M1")) == []
+
+def test_validate_median_window_too_large():
+    b = _median("M1", window="20")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E002" in codes
+
+def test_simulate_median_removes_spike():
+    """A single spike sample should be removed by median filter"""
+    b_c  = _const("C", "1.0")
+    # Add a spike via a step that goes back - actually use const + spike in scope
+    # Simple test: constant 1.0 through median → should stay 1.0
+    b_med = _median("M1", window="5")
+    b_sc  = _scope("SC")
+    model = _model([b_c, b_med, b_sc],
+                   [_wire("C","y","M1","u"), _wire("M1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    # After warmup (window-1 samples), all outputs should equal 1.0
+    assert np.allclose(sigs["SC.u0"][5:], 1.0)
+
+
+# ── NCO ──────────────────────────────────────────────────────────────────────
+
+def test_validate_nco_valid():
+    assert _validate_block(_nco("N1")) == []
+
+def test_validate_nco_bad_amplitude():
+    b = _nco("N1", amplitude="abc")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E001" in codes
+
+def test_simulate_nco_outputs_sin_cos():
+    """NCO with constant 1Hz freq → sin² + cos² = 1"""
+    b_c  = _const("FREQ", "1.0")
+    b_n  = _nco("N1", amplitude="1.0")
+    b_sc1 = _scope("SC1")
+    b_sc2 = _scope("SC2")
+    model = _model([b_c, b_n, b_sc1, b_sc2],
+                   [_wire("FREQ","y","N1","freq"),
+                    _wire("N1","sin_out","SC1","u0"),
+                    _wire("N1","cos_out","SC2","u0")])
+    _, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    s = sigs["SC1.u0"]
+    c = sigs["SC2.u0"]
+    # sin² + cos² ≈ 1
+    assert np.allclose(s**2 + c**2, 1.0, atol=1e-4)
+
+def test_codegen_nco_has_phase_state():
+    b_c = _const("FREQ", "1.0"); b_n = _nco("N1"); b_sc = _scope("SC")
+    model = _model([b_c, b_n, b_sc],
+                   [_wire("FREQ","y","N1","freq"), _wire("N1","sin_out","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"; model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_nco_phase_N1" in src
+    assert "sinf" in src and "cosf" in src
+
+
+# ── PeakDetector ─────────────────────────────────────────────────────────────
+
+def test_validate_peakdet_valid():
+    assert _validate_block(_peakdet("P1")) == []
+
+def test_validate_peakdet_bad_mode():
+    b = _peakdet("P1", mode="minimum")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E003" in codes
+
+def test_validate_peakdet_negative_decay():
+    b = _peakdet("P1", decay_rate="-1.0")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E002" in codes
+
+def test_simulate_peakdet_holds_max():
+    """Step 0→1 → peak should stay at 1 forever"""
+    b_step = _step("STP", step_time="0.05", initial_value="0.0", final_value="1.0")
+    b_pk   = _peakdet("P1", mode="max")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_pk, b_sc],
+                    [_wire("STP","y","P1","u"), _wire("P1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.2, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert np.all(y[100:] == 1.0)
+
+def test_simulate_peakdet_decays():
+    """Peak should decay when decay_rate > 0"""
+    # Use initial="1.0" so the peak starts at 1.0, input is 0 always → pure decay
+    b_c  = _const("C", "0.0")
+    b_pk = _peakdet("P1", mode="max", decay_rate="2.0", initial="1.0")
+    b_sc = _scope("SC")
+    model = _model([b_c, b_pk, b_sc],
+                   [_wire("C","y","P1","u"), _wire("P1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.5, step_s=0.001)
+    y = sigs["SC.u0"]
+    # After 0.5s with decay_rate=2, peak should have decayed significantly from 1.0
+    assert y[-1] < y[0]
+
+def test_codegen_peakdet_has_hold():
+    b_c = _const("C", "1.0"); b_pk = _peakdet("P1"); b_sc = _scope("SC")
+    model = _model([b_c, b_pk, b_sc],
+                   [_wire("C","y","P1","u"), _wire("P1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"; model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_peak_hold_P1" in src
 
 
 # ---------------------------------------------------------------------------

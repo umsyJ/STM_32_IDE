@@ -1156,6 +1156,118 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "Uses HAL_I2C_Mem_Write. In simulation the input is passed through for display."
         ),
     ),
+
+    # ---- Group Q: DSP -------------------------------------------------------
+
+    "FIRFilter": BlockSpec(
+        type_name="FIRFilter",
+        display_name="FIR Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "coefficients": ("0.25 0.25 0.25 0.25",
+                             "FIR tap weights b[0]..b[N-1], space-separated. "
+                             "y[k] = sum(b[i]*u[k-i])"),
+        },
+        description=(
+            "FIR (Finite Impulse Response) filter. "
+            "Enter tap weights as space-separated values; the filter length equals "
+            "the number of coefficients. "
+            "On STM32, uses a circular ring buffer for efficient computation."
+        ),
+    ),
+
+    "BiquadFilter": BlockSpec(
+        type_name="BiquadFilter",
+        display_name="Biquad Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "b0": ("1.0",  "Numerator coefficient b0"),
+            "b1": ("0.0",  "Numerator coefficient b1 (z\u207b\u00b9 term)"),
+            "b2": ("0.0",  "Numerator coefficient b2 (z\u207b\u00b2 term)"),
+            "a1": ("0.0",  "Denominator coefficient a1 (z\u207b\u00b9 term, sign as in H(z) denominator)"),
+            "a2": ("0.0",  "Denominator coefficient a2 (z\u207b\u00b2 term)"),
+        },
+        description=(
+            "Second-order IIR filter (biquad section) in Direct Form II. "
+            "H(z) = (b0 + b1\u00b7z\u207b\u00b9 + b2\u00b7z\u207b\u00b2) / (1 + a1\u00b7z\u207b\u00b9 + a2\u00b7z\u207b\u00b2). "
+            "Chain multiple blocks for higher-order filters. "
+            "Can implement low-pass, high-pass, band-pass, notch, and peak/shelf filters."
+        ),
+    ),
+
+    "RunningRMS": BlockSpec(
+        type_name="RunningRMS",
+        display_name="Running RMS",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("100", "Number of samples in the RMS window (>= 1)"),
+        },
+        description=(
+            "Computes the Root Mean Square of the input over a sliding window of N samples. "
+            "y = sqrt(mean(u\u00b2)) over the last window samples. "
+            "On STM32, uses a circular buffer of squared values."
+        ),
+    ),
+
+    "MedianFilter": BlockSpec(
+        type_name="MedianFilter",
+        display_name="Median Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("5", "Window size (odd integer >= 3 recommended; max 15 for C codegen)"),
+        },
+        description=(
+            "Running median filter over the last N samples. "
+            "Effective at removing impulse noise (salt-and-pepper). "
+            "On STM32, uses an insertion-sort on the buffer (efficient for small windows)."
+        ),
+    ),
+
+    "NCO": BlockSpec(
+        type_name="NCO",
+        display_name="NCO",
+        color="#0e4d6e",
+        inputs=[PortSpec("freq", "in")],
+        outputs=[PortSpec("sin_out", "out"), PortSpec("cos_out", "out")],
+        params={
+            "amplitude":     ("1.0", "Output amplitude"),
+            "initial_phase": ("0.0", "Initial phase in degrees"),
+        },
+        description=(
+            "Numerically Controlled Oscillator. "
+            "Accepts a frequency input (Hz) and outputs sin and cos at that frequency. "
+            "Phase is accumulated each step: phi[k] = phi[k-1] + 2*pi*freq*dt. "
+            "Useful for lock-in amplifiers, synchronous detection, and modulation."
+        ),
+    ),
+
+    "PeakDetector": BlockSpec(
+        type_name="PeakDetector",
+        display_name="Peak Detector",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mode":       ("max",  "Peak mode: 'max' (track maximum) or 'abs_max' (track max absolute value)"),
+            "decay_rate": ("0.0",  "Peak decay rate per second (0 = hold forever). "
+                                   "y[k] = max(|u[k]|, y[k-1] - decay_rate*dt)"),
+            "initial":    ("0.0",  "Initial peak value"),
+        },
+        description=(
+            "Tracks and holds the peak value of the input signal. "
+            "mode='max': tracks maximum (signed). "
+            "mode='abs_max': tracks maximum absolute value. "
+            "decay_rate > 0 causes the held peak to gradually decay toward zero."
+        ),
+    ),
 }
 
 
@@ -2781,6 +2893,54 @@ def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
         if db is None or int(db) not in (1, 2): _bad("data_bytes", "E002", "data_bytes must be 1 or 2")
         if _num("scale", "1.0") is None: _bad("scale", "E001", "Must be a valid number")
 
+    # ---- FIRFilter ----------------------------------------------------------
+    elif btype == "FIRFilter":
+        c_str = p.get("coefficients", "").strip()
+        if not c_str:
+            _bad("coefficients", "E001", "Must have at least one coefficient")
+        else:
+            try:
+                coeffs = [float(x) for x in c_str.split()]
+                if len(coeffs) == 0:
+                    _bad("coefficients", "E001", "Must have at least one coefficient")
+            except ValueError:
+                _bad("coefficients", "E001",
+                     "All tap weights must be valid numbers (space-separated)")
+
+    # ---- BiquadFilter -------------------------------------------------------
+    elif btype == "BiquadFilter":
+        for pname in ("b0", "b1", "b2", "a1", "a2"):
+            if _num(pname, "0.0") is None:
+                _bad(pname, "E001", f"{pname} must be a valid number")
+
+    # ---- RunningRMS ---------------------------------------------------------
+    elif btype == "RunningRMS":
+        w = _num("window", "100")
+        if w is None:       _bad("window", "E001", "Must be a valid integer")
+        elif int(w) < 1:    _bad("window", "E002", "window must be >= 1")
+
+    # ---- MedianFilter -------------------------------------------------------
+    elif btype == "MedianFilter":
+        w = _num("window", "5")
+        if w is None:        _bad("window", "E001", "Must be a valid integer")
+        elif int(w) < 1:     _bad("window", "E002", "window must be >= 1")
+        elif int(w) > 15:    _bad("window", "E002", "window must be <= 15 for embedded C codegen")
+
+    # ---- NCO ----------------------------------------------------------------
+    elif btype == "NCO":
+        if _num("amplitude",     "1.0") is None: _bad("amplitude",     "E001", "Must be a valid number")
+        if _num("initial_phase", "0.0") is None: _bad("initial_phase", "E001", "Must be a valid number")
+
+    # ---- PeakDetector -------------------------------------------------------
+    elif btype == "PeakDetector":
+        mode = p.get("mode", "max").strip().lower()
+        if mode not in ("max", "abs_max"):
+            _bad("mode", "E003", "mode must be 'max' or 'abs_max'")
+        dr = _num("decay_rate", "0.0")
+        if dr is None:  _bad("decay_rate", "E001", "Must be a valid number")
+        elif dr < 0:    _bad("decay_rate", "E002", "decay_rate must be >= 0")
+        if _num("initial", "0.0") is None: _bad("initial", "E001", "Must be a valid number")
+
     return errors
 
 
@@ -3432,6 +3592,92 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             ic    = pval(b["params"].get("initial_condition", "0.0"))
             pad   = np.full(delay, ic)
             outs[(bid, "y")] = np.concatenate([pad, u_arr])[:n]
+
+        elif b["type"] == "FIRFilter":
+            u_arr  = _input("u")
+            c_str  = b["params"].get("coefficients", "0.25 0.25 0.25 0.25")
+            try:
+                coeffs = np.array([float(x) for x in c_str.split()], dtype=float)
+                # Causal convolution — same as scipy.signal.lfilter(coeffs, [1], u_arr)
+                try:
+                    from scipy.signal import lfilter
+                    y = lfilter(coeffs, [1.0], u_arr)
+                except ImportError:
+                    # Manual implementation
+                    nt = len(coeffs)
+                    y  = np.zeros(n)
+                    for k in range(n):
+                        for i in range(min(nt, k + 1)):
+                            y[k] += coeffs[i] * u_arr[k - i]
+                outs[(bid, "y")] = y
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
+
+        elif b["type"] == "BiquadFilter":
+            u_arr = _input("u")
+            b0 = pval(b["params"].get("b0", "1.0"))
+            b1 = pval(b["params"].get("b1", "0.0"))
+            b2 = pval(b["params"].get("b2", "0.0"))
+            a1 = pval(b["params"].get("a1", "0.0"))
+            a2 = pval(b["params"].get("a2", "0.0"))
+            try:
+                from scipy.signal import lfilter
+                y = lfilter([b0, b1, b2], [1.0, a1, a2], u_arr)
+            except ImportError:
+                # Direct Form II
+                y  = np.zeros(n)
+                w1, w2 = 0.0, 0.0
+                for k in range(n):
+                    w0 = u_arr[k] - a1 * w1 - a2 * w2
+                    y[k] = b0 * w0 + b1 * w1 + b2 * w2
+                    w2, w1 = w1, w0
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "RunningRMS":
+            u_arr = _input("u")
+            w     = max(1, int(round(pval(b["params"].get("window", "100")))))
+            u_sq  = u_arr ** 2
+            # Causal moving average of u², then sqrt
+            kernel = np.ones(w) / w
+            rms_sq = np.convolve(u_sq, kernel, mode='full')[:n]
+            outs[(bid, "y")] = np.sqrt(np.maximum(rms_sq, 0.0))
+
+        elif b["type"] == "MedianFilter":
+            u_arr = _input("u")
+            w     = max(1, int(round(pval(b["params"].get("window", "5")))))
+            y     = np.zeros(n)
+            buf   = []
+            for k in range(n):
+                buf.append(float(u_arr[k]))
+                if len(buf) > w:
+                    buf.pop(0)
+                y[k] = float(np.median(buf))
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "NCO":
+            freq_arr = _input("freq")
+            amp      = pval(b["params"].get("amplitude",     "1.0"))
+            phi0     = pval(b["params"].get("initial_phase", "0.0")) * math.pi / 180.0
+            phase    = np.empty(n)
+            phi      = phi0
+            for k in range(n):
+                phase[k] = phi
+                phi += 2.0 * math.pi * freq_arr[k] * step_s
+            outs[(bid, "sin_out")] = amp * np.sin(phase)
+            outs[(bid, "cos_out")] = amp * np.cos(phase)
+
+        elif b["type"] == "PeakDetector":
+            u_arr  = _input("u")
+            mode   = b["params"].get("mode", "max").strip().lower()
+            decay  = pval(b["params"].get("decay_rate", "0.0"))
+            ic     = pval(b["params"].get("initial",    "0.0"))
+            y      = np.empty(n)
+            peak   = ic
+            for k in range(n):
+                val  = abs(float(u_arr[k])) if mode == "abs_max" else float(u_arr[k])
+                peak = max(val, peak - decay * step_s)
+                y[k] = peak
+            outs[(bid, "y")] = y
 
     # ToWorkspace: capture signal into the Python workspace and expose it to
     # the Simulate Scope tab so the user can see what was saved.
