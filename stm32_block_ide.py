@@ -1378,11 +1378,13 @@ class PortItem(QGraphicsRectItem):
         self.setToolTip(f"{'▶ out' if direction == 'out' else '◀ in'}: {name}")
 
     def hoverEnterEvent(self, ev):
+        self.prepareGeometryChange()
         self.setBrush(QBrush(QColor("#ffd54a")))
         self.setRect(-PORT_RADIUS * 1.5, -PORT_RADIUS * 1.5,
                      PORT_RADIUS * 3, PORT_RADIUS * 3)
 
     def hoverLeaveEvent(self, ev):
+        self.prepareGeometryChange()
         self.setBrush(QBrush(QColor("#222")))
         self.setRect(-PORT_RADIUS, -PORT_RADIUS, PORT_RADIUS * 2, PORT_RADIUS * 2)
 
@@ -1465,6 +1467,14 @@ class BlockItem(QGraphicsRectItem):
             painter.setFont(fb)
             painter.setPen(QPen(QColor("white")))
             painter.drawText(badge, Qt.AlignCenter, "!")
+
+    def boundingRect(self) -> QRectF:
+        # Ports sit on the block edge and their rect extends PORT_RADIUS
+        # beyond the block in all directions.  Expanding the bounding rect
+        # by PORT_RADIUS * 1.5 ensures Qt invalidates the full dirty region
+        # (including the port squares) when this item moves, preventing ghosts.
+        m = PORT_RADIUS * 1.5
+        return super().boundingRect().adjusted(-m, -m, m, m)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -1765,6 +1775,10 @@ class BlockView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setAcceptDrops(True)
+        # BoundingRectViewportUpdate ensures the full bounding rect (including
+        # child PortItems that overhang the parent block edge) is invalidated
+        # when a block moves — prevents ghost squares being left behind.
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
