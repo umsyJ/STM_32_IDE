@@ -4348,6 +4348,128 @@ def test_codegen_zpk():
 
 
 # ---------------------------------------------------------------------------
+# FreeRTOS / CMSIS-RTOS codegen tests
+# ---------------------------------------------------------------------------
+
+def _rtos_model():
+    """Minimal model with use_rtos=True for codegen tests."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_sc], [_wire("SRC", "y", "SC", "u0")])
+    model["board"]    = "NUCLEO-F446RE"
+    model["step_ms"]  = 1
+    model["use_rtos"] = True
+    return model
+
+
+def test_codegen_rtos_uses_cmsis_header():
+    """FreeRTOS build must include cmsis_os.h, not rely on bare-metal SysTick."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "#include \"cmsis_os.h\"" in src
+
+
+def test_codegen_rtos_has_model_task():
+    """FreeRTOS build must define ModelTask and osThreadNew."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "ModelTask" in src
+    assert "osThreadNew" in src
+
+
+def test_codegen_rtos_uses_osdelayuntil():
+    """ModelTask must call osDelayUntil for precise periodic execution."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "osDelayUntil" in src
+
+
+def test_codegen_rtos_no_systick_handler():
+    """FreeRTOS build must NOT define its own SysTick_Handler (FreeRTOS owns it)."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "SysTick_Handler" not in src
+
+
+def test_codegen_rtos_no_tick_flag():
+    """FreeRTOS build must NOT use the bare-metal step_tick_flag polling pattern."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "step_tick_flag" not in src
+
+
+def test_codegen_rtos_hal_conf_use_rtos_1():
+    """stm32f4xx_hal_conf.h must have USE_RTOS 1U for FreeRTOS builds."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        conf = (proj / "stm32f4xx_hal_conf.h").read_text()
+    assert "USE_RTOS                     1U" in conf
+
+
+def test_codegen_bare_metal_hal_conf_use_rtos_0():
+    """Bare-metal builds must keep USE_RTOS 0U."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_sc], [_wire("SRC", "y", "SC", "u0")])
+    model["board"]    = "NUCLEO-F446RE"
+    model["step_ms"]  = 1
+    model["use_rtos"] = False
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        conf = (proj / "stm32f4xx_hal_conf.h").read_text()
+    assert "USE_RTOS                     0U" in conf
+
+
+def test_codegen_rtos_freertos_config_generated():
+    """FreeRTOS build must emit a FreeRTOSConfig.h file."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        cfg  = (proj / "FreeRTOSConfig.h")
+        assert cfg.exists(), "FreeRTOSConfig.h was not generated"
+        txt = cfg.read_text()
+    assert "configTICK_RATE_HZ" in txt
+    assert "configTOTAL_HEAP_SIZE" in txt
+
+
+def test_codegen_bare_metal_no_freertos_config():
+    """Bare-metal build must NOT emit FreeRTOSConfig.h."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_sc], [_wire("SRC", "y", "SC", "u0")])
+    model["board"]    = "NUCLEO-F446RE"
+    model["step_ms"]  = 1
+    model["use_rtos"] = False
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        assert not (proj / "FreeRTOSConfig.h").exists()
+
+
+def test_codegen_rtos_makefile_includes_freertos_sources():
+    """RTOS Makefile must reference FreeRTOS kernel .c files."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        mk   = (proj / "Makefile").read_text()
+    assert "tasks.c" in mk
+    assert "portable/GCC/ARM_CM4F/port.c" in mk
+    assert "heap_4.c" in mk
+    assert "cmsis_os2.c" in mk
+
+
+def test_codegen_rtos_oskernel_start_in_main():
+    """main() must call osKernelInitialize and osKernelStart."""
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), _rtos_model(), FakeWorkspace())
+        src  = (proj / "main.c").read_text()
+    assert "osKernelInitialize" in src
+    assert "osKernelStart" in src
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 

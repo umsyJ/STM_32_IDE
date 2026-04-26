@@ -2780,9 +2780,10 @@ class MainWindow(QMainWindow):
         self._make_statusbar()
         self._make_menu()
 
-        # current board
-        self.board = "NUCLEO-F446RE"
-        self.step_ms = 1  # model step
+        # current board / scheduler
+        self.board    = "NUCLEO-F446RE"
+        self.step_ms  = 1
+        self.use_rtos = False
 
         # worker
         self._worker: Optional[BuildFlashWorker] = None
@@ -2815,6 +2816,16 @@ class MainWindow(QMainWindow):
         self.step_spin.setRange(1, 1000); self.step_spin.setValue(1)
         self.step_spin.valueChanged.connect(lambda v: setattr(self, "step_ms", v))
         tb.addWidget(self.step_spin)
+
+        tb.addSeparator()
+        tb.addWidget(QLabel(" Scheduler: "))
+        self.rtos_box = QComboBox()
+        self.rtos_box.addItems(["Bare-metal", "FreeRTOS"])
+        self.rtos_box.setToolTip(
+            "Bare-metal: SysTick flag-polling super-loop (no OS overhead)\n"
+            "FreeRTOS:   CMSIS-RTOS v2 task with osDelayUntil() for precise timing")
+        self.rtos_box.currentTextChanged.connect(self._rtos_changed)
+        tb.addWidget(self.rtos_box)
 
         tb.addSeparator()
         build_act = QAction("Build", self)
@@ -2900,6 +2911,11 @@ class MainWindow(QMainWindow):
         self.board = name
         self.statusBar().showMessage(f"Board: {name}")
 
+    def _rtos_changed(self, text: str) -> None:
+        self.use_rtos = (text == "FreeRTOS")
+        label = "FreeRTOS (CMSIS-RTOS v2)" if self.use_rtos else "Bare-metal"
+        self.statusBar().showMessage(f"Scheduler: {label}")
+
     def _example_model(self) -> None:
         """Drop a default SquareWave -> GpioOut example so the UI isn't empty."""
         b1 = self.scene.add_block_by_type("SquareWave", QPointF(-300, -50))
@@ -2977,8 +2993,9 @@ class MainWindow(QMainWindow):
 
     def _write_model(self, path: Path) -> None:
         data = self.scene.to_model()
-        data["board"]   = self.board
-        data["step_ms"] = self.step_ms
+        data["board"]    = self.board
+        data["step_ms"]  = self.step_ms
+        data["use_rtos"] = self.use_rtos
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self._set_clean(path)
         self.statusBar().showMessage(f"Saved: {path}")
@@ -3004,6 +3021,8 @@ class MainWindow(QMainWindow):
         self.board_box.setCurrentText(self.board)
         self.step_ms = int(data.get("step_ms", 1))
         self.step_spin.setValue(self.step_ms)
+        self.use_rtos = bool(data.get("use_rtos", False))
+        self.rtos_box.setCurrentText("FreeRTOS" if self.use_rtos else "Bare-metal")
         self._clear_validation_errors()
         self._set_clean(path)
         self.statusBar().showMessage(f"Opened: {path}")
@@ -3099,8 +3118,9 @@ class MainWindow(QMainWindow):
 
     def _generate_project(self, out_dir: Path) -> Path:
         model = self.scene.to_model()
-        model["board"] = self.board
-        model["step_ms"] = self.step_ms
+        model["board"]    = self.board
+        model["step_ms"]  = self.step_ms
+        model["use_rtos"] = self.use_rtos
         proj = generate_project(out_dir, model, WORKSPACE)
         return proj
 
