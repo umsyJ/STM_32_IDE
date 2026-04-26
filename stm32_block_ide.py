@@ -44,7 +44,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
     QSplitter, QStatusBar, QTabWidget, QTextEdit, QToolBar, QVBoxLayout,
-    QWidget, QCheckBox, QMenu,
+    QWidget, QCheckBox, QMenu, QTreeWidget, QTreeWidgetItem,
 )
 
 import numpy as np
@@ -1270,6 +1270,49 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Block palette categories  (order determines display order in the panel)
+# ---------------------------------------------------------------------------
+
+PALETTE_CATEGORIES: List[Tuple[str, List[str]]] = [
+    ("Sources", [
+        "SquareWave", "SineWave", "Ramp", "Clock", "PulseGenerator",
+        "Chirp", "RandomNumber", "Step", "Constant", "FromWorkspace", "Ground",
+    ]),
+    ("Math", [
+        "Sum", "Product", "Gain", "Abs", "Sign", "Sqrt", "MinMax",
+        "MathFunction", "RoundingFunction", "Divide", "Bias", "Polynomial",
+    ]),
+    ("Nonlinear / Logic", [
+        "Saturation", "SaturationDynamic", "DeadZone", "Switch",
+        "MultiportSwitch", "RelationalOperator", "LogicalOperator",
+        "RateLimiter", "Quantizer", "CompareToConstant",
+        "DetectRisePositive", "Relay",
+    ]),
+    ("Continuous", [
+        "Integrator", "TransferFcn", "PID", "StateSpace", "ZeroPoleGain",
+    ]),
+    ("Discrete", [
+        "UnitDelay", "DiscreteIntegrator", "ZeroOrderHold", "Derivative",
+        "DiscreteTransferFcn", "MovingAverage", "DiscreteStateSpace",
+        "TransportDelay",
+    ]),
+    ("Lookup", [
+        "Lookup1D", "Lookup2D",
+    ]),
+    ("DSP", [
+        "FIRFilter", "BiquadFilter", "RunningRMS", "MedianFilter",
+        "NCO", "PeakDetector",
+    ]),
+    ("STM32 HAL", [
+        "GpioIn", "GpioOut", "Ultrasonic", "ADC", "DAC", "PWMOut",
+        "TimerTick", "EncoderRead", "UARTSend", "I2CRead", "I2CWrite",
+    ]),
+    ("Sinks", [
+        "Scope", "ToWorkspace",
+    ]),
+]
+
 
 @dataclass
 class BlockInstance:
@@ -1745,20 +1788,112 @@ class BlockView(QGraphicsView):
 # Palette dock (draggable list of block types)
 # ---------------------------------------------------------------------------
 
-class BlockPalette(QListWidget):
-    def __init__(self):
-        super().__init__()
-        self.setDragEnabled(True)
-        for spec in BLOCK_CATALOG.values():
-            item = QListWidgetItem(spec.display_name)
-            item.setData(Qt.UserRole, spec.type_name)
-            self.addItem(item)
+class _PaletteTree(QTreeWidget):
+    """QTreeWidget that exports the selected block's type_name as plain-text mime
+    so BlockView.dropEvent can identify which block to place."""
 
     def mimeData(self, items):
         md = super().mimeData(items)
         if items:
-            md.setText(items[0].data(Qt.UserRole))
+            type_name = items[0].data(0, Qt.UserRole)
+            if type_name:           # only leaf (block) items carry a type_name
+                md.setText(type_name)
         return md
+
+    def startDrag(self, supported_actions):
+        item = self.currentItem()
+        if item and item.data(0, Qt.UserRole):   # block leaf only — not a category header
+            super().startDrag(supported_actions)
+
+
+class BlockPalette(QWidget):
+    """Categorised, searchable, draggable block library panel."""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 4, 2, 2)
+        layout.setSpacing(3)
+
+        # -- search bar --
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search blocks…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setStyleSheet(
+            "QLineEdit { background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;"
+            "border-radius: 3px; padding: 3px 6px; }"
+        )
+        self._search.textChanged.connect(self._filter)
+        layout.addWidget(self._search)
+
+        # -- tree --
+        self._tree = _PaletteTree()
+        self._tree.setHeaderHidden(True)
+        self._tree.setDragEnabled(True)
+        self._tree.setDragDropMode(QTreeWidget.DragOnly)
+        self._tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self._tree.setIndentation(14)
+        self._tree.setAnimated(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget { background: #1a1a2e; border: none; color: #dcdcdc; }"
+            "QTreeWidget::item { padding: 3px 2px; }"
+            "QTreeWidget::item:selected { background: #1f4068; color: #ffffff; }"
+            "QTreeWidget::item:hover:!selected { background: #162447; }"
+            "QTreeWidget::branch { background: #1a1a2e; }"
+        )
+        layout.addWidget(self._tree)
+
+        self._cat_items: List[QTreeWidgetItem] = []
+        self._build_tree()
+
+    # ------------------------------------------------------------------
+    def _build_tree(self):
+        self._tree.clear()
+        self._cat_items = []
+
+        _cat_font = QFont("Segoe UI", 8, QFont.Bold)
+        _cat_fg   = QColor("#7ec8e3")
+
+        for cat_name, block_types in PALETTE_CATEGORIES:
+            cat_item = QTreeWidgetItem([cat_name])
+            cat_item.setFont(0, _cat_font)
+            cat_item.setForeground(0, _cat_fg)
+            cat_item.setExpanded(False)
+            self._tree.addTopLevelItem(cat_item)
+            self._cat_items.append(cat_item)
+
+            for type_name in block_types:
+                spec = BLOCK_CATALOG.get(type_name)
+                if spec is None:
+                    continue
+                block_item = QTreeWidgetItem([spec.display_name])
+                block_item.setData(0, Qt.UserRole, type_name)
+                block_item.setForeground(0, QColor(spec.color))
+                block_item.setToolTip(0, spec.description or spec.display_name)
+                cat_item.addChild(block_item)
+
+    # ------------------------------------------------------------------
+    def _filter(self, text: str):
+        query = text.strip().lower()
+
+        if not query:
+            for cat in self._cat_items:
+                cat.setHidden(False)
+                cat.setExpanded(False)
+                for i in range(cat.childCount()):
+                    cat.child(i).setHidden(False)
+            return
+
+        for cat in self._cat_items:
+            any_visible = False
+            for i in range(cat.childCount()):
+                child = cat.child(i)
+                match = query in child.text(0).lower()
+                child.setHidden(not match)
+                if match:
+                    any_visible = True
+            cat.setHidden(not any_visible)
+            cat.setExpanded(any_visible)
 
 
 # ---------------------------------------------------------------------------
@@ -3869,7 +4004,8 @@ class MainWindow(QMainWindow):
         editor_layout = QHBoxLayout(editor_widget)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         self.palette = BlockPalette()
-        self.palette.setMaximumWidth(180)
+        self.palette.setMinimumWidth(160)
+        self.palette.setMaximumWidth(220)
         self.param_panel = ParamPanel()
         self.param_panel.setMinimumWidth(240)
         self.scene.block_selected.connect(self.param_panel.set_block)
