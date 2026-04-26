@@ -671,6 +671,68 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "In simulation, y = t * 1000 * scale."
         ),
     ),
+
+    "StateSpace": BlockSpec(
+        type_name="StateSpace",
+        display_name="State Space",
+        color="#154360",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "A":             ("0",      "System matrix (n×n). Rows separated by ';', e.g. '0 1; -2 -3'"),
+            "B":             ("1",      "Input matrix (n×1). Rows separated by ';', e.g. '0; 1'"),
+            "C":             ("1",      "Output matrix (1×n). Space-separated, e.g. '1 0'"),
+            "D":             ("0",      "Feedthrough scalar"),
+            "initial_state": ("",       "Initial state vector, space-separated (defaults to zeros)"),
+            "method":        ("euler",  "Discretization method: 'euler' or 'zoh'"),
+        },
+        description=(
+            "Continuous-time state-space model: dx/dt = Ax + Bu, y = Cx + Du. "
+            "Discretized via forward Euler (Ad=I+A·dt, Bd=B·dt) or ZOH (requires scipy). "
+            "A is n×n, B is n×1, C is 1×n, D is scalar. "
+            "Rows separated by ';', columns by spaces."
+        ),
+    ),
+
+    "DiscreteStateSpace": BlockSpec(
+        type_name="DiscreteStateSpace",
+        display_name="Discrete State Space",
+        color="#1a2456",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "Ad":            ("1",  "Discrete system matrix (n×n). Rows separated by ';'"),
+            "Bd":            ("1",  "Discrete input matrix (n×1). Rows separated by ';'"),
+            "Cd":            ("1",  "Output matrix (1×n). Space-separated"),
+            "Dd":            ("0",  "Feedthrough scalar"),
+            "initial_state": ("",   "Initial state vector, space-separated (defaults to zeros)"),
+        },
+        description=(
+            "Discrete-time state-space model: x[k+1] = Ad·x[k] + Bd·u[k], "
+            "y[k] = Cd·x[k] + Dd·u[k]. "
+            "Enter already-discretized matrices — no conversion is applied. "
+            "Rows separated by ';', columns by spaces."
+        ),
+    ),
+
+    "ZeroPoleGain": BlockSpec(
+        type_name="ZeroPoleGain",
+        display_name="Zero-Pole-Gain",
+        color="#4a235a",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "zeros": ("",    "s-domain zeros, space-separated real values (leave empty for none)"),
+            "poles": ("-1",  "s-domain poles, space-separated real values"),
+            "gain":  ("1.0", "System gain K"),
+        },
+        description=(
+            "Continuous-time transfer function in zero-pole-gain form: "
+            "H(s) = K * prod(s-z) / prod(s-p). "
+            "Only real poles/zeros are supported. "
+            "Internally converts to rational TF then discretizes via bilinear (Tustin) transform."
+        ),
+    ),
 }
 
 
@@ -1943,6 +2005,83 @@ def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
         if sc is None:   _bad("scale", "E001", "Must be a valid number")
         elif sc == 0:    _bad("scale", "E002", "scale must be != 0")
 
+    # ---- StateSpace ----------------------------------------------------------
+    elif btype == "StateSpace":
+        for pname in ("A", "B", "C"):
+            pstr = p.get(pname, "")
+            if not pstr.strip():
+                _bad(pname, "E001", f"Matrix {pname} cannot be empty")
+                continue
+            try:
+                rows = [r.strip() for r in pstr.split(";") if r.strip()]
+                for row in rows:
+                    [float(v) for v in row.split()]
+            except ValueError:
+                _bad(pname, "E001",
+                     f"Matrix {pname}: all values must be numbers (rows by ';', cols by spaces)")
+        if _num("D", "0") is None:
+            _bad("D", "E001", "D must be a valid number")
+        method = p.get("method", "euler").strip().lower()
+        if method not in ("euler", "zoh"):
+            _bad("method", "E003", "method must be 'euler' or 'zoh'")
+        ic_str = p.get("initial_state", "").strip()
+        if ic_str:
+            try:
+                [float(v) for v in ic_str.split()]
+            except ValueError:
+                _bad("initial_state", "E001",
+                     "initial_state must be space-separated numbers")
+
+    # ---- DiscreteStateSpace -------------------------------------------------
+    elif btype == "DiscreteStateSpace":
+        for pname in ("Ad", "Bd", "Cd"):
+            pstr = p.get(pname, "")
+            if not pstr.strip():
+                _bad(pname, "E001", f"Matrix {pname} cannot be empty")
+                continue
+            try:
+                rows = [r.strip() for r in pstr.split(";") if r.strip()]
+                for row in rows:
+                    [float(v) for v in row.split()]
+            except ValueError:
+                _bad(pname, "E001",
+                     f"Matrix {pname}: all values must be numbers (rows by ';', cols by spaces)")
+        if _num("Dd", "0") is None:
+            _bad("Dd", "E001", "Dd must be a valid number")
+        ic_str = p.get("initial_state", "").strip()
+        if ic_str:
+            try:
+                [float(v) for v in ic_str.split()]
+            except ValueError:
+                _bad("initial_state", "E001",
+                     "initial_state must be space-separated numbers")
+
+    # ---- ZeroPoleGain -------------------------------------------------------
+    elif btype == "ZeroPoleGain":
+        zeros_str = p.get("zeros", "").strip()
+        if zeros_str:
+            try:
+                [float(v) for v in zeros_str.split()]
+            except ValueError:
+                _bad("zeros", "E001",
+                     "zeros must be space-separated real numbers (e.g. '-1 -2')")
+        poles_str = p.get("poles", "-1").strip()
+        if not poles_str:
+            _bad("poles", "E001", "poles cannot be empty; enter at least one pole")
+        else:
+            try:
+                pvals = [float(v) for v in poles_str.split()]
+                if len(pvals) == 0:
+                    _bad("poles", "E001", "Enter at least one pole")
+            except ValueError:
+                _bad("poles", "E001",
+                     "poles must be space-separated real numbers (e.g. '-1 -2')")
+        g = _num("gain", "1.0")
+        if g is None:
+            _bad("gain", "E001", "gain must be a valid number")
+        elif g == 0.0:
+            _bad("gain", "E002", "gain must not be zero")
+
     return errors
 
 
@@ -1971,6 +2110,26 @@ def validate_model(model: dict, workspace=None) -> List[ValidationError]:
 # ---------------------------------------------------------------------------
 # Pure-Python simulator (for the "Simulate Model" button)
 # ---------------------------------------------------------------------------
+
+def _parse_matrix(s: str) -> "np.ndarray":
+    """Parse a matrix from a string. Rows separated by ';', cols by spaces.
+    A scalar string like '1' or '0' returns a 1×1 array.
+    A row vector like '1 0' returns a 1×2 array (will be flattened to 1-D where needed).
+    A column vector '0; 1' returns a 2×1 array.
+    """
+    rows = [r.strip() for r in s.split(";") if r.strip()]
+    if not rows:
+        return np.array([[0.0]])
+    result = []
+    for row in rows:
+        result.append([float(v) for v in row.split()])
+    # Make jagged rows same length (pad with zeros)
+    max_cols = max(len(r) for r in result)
+    for r in result:
+        while len(r) < max_cols:
+            r.append(0.0)
+    return np.array(result, dtype=float)
+
 
 def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
@@ -2137,6 +2296,105 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 raw    = p_out + integ + d_out
                 y[k]   = max(lower, min(upper, raw))
             outs[(bid, "y")] = y
+
+        elif b["type"] == "StateSpace":
+            u_arr   = _input("u")
+            A_str   = b["params"].get("A", "0")
+            B_str   = b["params"].get("B", "1")
+            C_str   = b["params"].get("C", "1")
+            D_val   = pval(b["params"].get("D", "0"))
+            ic_str  = b["params"].get("initial_state", "").strip()
+            method  = b["params"].get("method", "euler").strip().lower()
+            try:
+                A_mat = _parse_matrix(A_str)
+                B_mat = _parse_matrix(B_str)
+                C_mat = _parse_matrix(C_str)
+                ns = A_mat.shape[0]  # number of states
+                B_vec = B_mat.flatten()[:ns]
+                C_vec = C_mat.flatten()[:ns]
+                x = (np.array([float(v) for v in ic_str.split()])
+                     if ic_str else np.zeros(ns))
+                # Discretize
+                if method == "zoh":
+                    try:
+                        from scipy.signal import cont2discrete as _c2d
+                        _sys = (A_mat,
+                                B_vec.reshape(-1, 1),
+                                C_vec.reshape(1, -1),
+                                np.array([[D_val]]))
+                        Ad, Bd_m, _, _, _ = _c2d(_sys, step_s, method="zoh")
+                        Ad = Ad
+                        Bd = Bd_m.flatten()
+                    except Exception:
+                        Ad = np.eye(ns) + A_mat * step_s
+                        Bd = B_vec * step_s
+                else:
+                    Ad = np.eye(ns) + A_mat * step_s
+                    Bd = B_vec * step_s
+                y_arr = np.empty(n)
+                for k in range(n):
+                    y_arr[k] = float(C_vec @ x) + D_val * u_arr[k]
+                    x = Ad @ x + Bd * u_arr[k]
+                outs[(bid, "y")] = y_arr
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
+
+        elif b["type"] == "DiscreteStateSpace":
+            u_arr  = _input("u")
+            Ad_str = b["params"].get("Ad", "1")
+            Bd_str = b["params"].get("Bd", "1")
+            Cd_str = b["params"].get("Cd", "1")
+            Dd_val = pval(b["params"].get("Dd", "0"))
+            ic_str = b["params"].get("initial_state", "").strip()
+            try:
+                Ad = _parse_matrix(Ad_str)
+                Bd_mat = _parse_matrix(Bd_str)
+                Cd_mat = _parse_matrix(Cd_str)
+                ns = Ad.shape[0]
+                Bd = Bd_mat.flatten()[:ns]
+                Cd = Cd_mat.flatten()[:ns]
+                x  = (np.array([float(v) for v in ic_str.split()])
+                      if ic_str else np.zeros(ns))
+                y_arr = np.empty(n)
+                for k in range(n):
+                    y_arr[k] = float(Cd @ x) + Dd_val * u_arr[k]
+                    x = Ad @ x + Bd * u_arr[k]
+                outs[(bid, "y")] = y_arr
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
+
+        elif b["type"] == "ZeroPoleGain":
+            u_arr     = _input("u")
+            zeros_str = b["params"].get("zeros", "").strip()
+            poles_str = b["params"].get("poles", "-1").strip()
+            gain      = pval(b["params"].get("gain", "1.0"))
+            try:
+                z = np.array([float(v) for v in zeros_str.split()]) if zeros_str else np.array([])
+                p_arr = np.array([float(v) for v in poles_str.split()])
+                # Convert ZPK → TF numerator/denominator
+                num_s = np.atleast_1d(gain * np.real(np.poly(z)))
+                den_s = np.atleast_1d(np.real(np.poly(p_arr)))
+                # Represent as space-separated strings for _bilinear_tf
+                num_str = " ".join(str(c) for c in num_s)
+                den_str = " ".join(str(c) for c in den_s)
+                bz, az = _bilinear_tf(num_str, den_str, 1.0 / step_s)
+                try:
+                    from scipy.signal import lfilter
+                    y = lfilter(bz, az, u_arr)
+                except ImportError:
+                    y = np.zeros(n)
+                    order = len(az) - 1
+                    s = np.zeros(order)
+                    for k in range(n):
+                        yk = bz[0] * u_arr[k] + (s[0] if order else 0.0)
+                        for j in range(order - 1):
+                            s[j] = bz[j+1]*u_arr[k] - az[j+1]*yk + s[j+1]
+                        if order:
+                            s[order-1] = bz[order]*u_arr[k] - az[order]*yk
+                        y[k] = yk
+                outs[(bid, "y")] = y
+            except Exception:
+                outs[(bid, "y")] = np.zeros(n)
 
         elif b["type"] == "Gain":
             k = pval(b["params"].get("gain", "1.0"))
@@ -2612,7 +2870,7 @@ class MainWindow(QMainWindow):
             self._sim_debounce.start()
 
     def _auto_simulate(self) -> None:
-        self.on_simulate()
+        self.on_simulate(switch_tab=False)
 
     # ------------------------------------------------------------------
     # Validation helpers
@@ -2651,7 +2909,7 @@ class MainWindow(QMainWindow):
     # Simulate
     # ------------------------------------------------------------------
 
-    def on_simulate(self) -> None:
+    def on_simulate(self, switch_tab: bool = True) -> None:
         model = self.scene.to_model()
         model["board"] = self.board
         model["step_ms"] = self.step_ms
@@ -2673,7 +2931,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Simulation error", str(e))
             return
         self.sim_scope_tab.show_simulation(t, sigs)
-        self.tabs.setCurrentWidget(self.sim_scope_tab)
+        if switch_tab:
+            self.tabs.setCurrentWidget(self.sim_scope_tab)
         # Collect the names written by ToWorkspace blocks, refresh the
         # variable table, and echo the names to the command window so the
         # user knows what landed in the workspace.

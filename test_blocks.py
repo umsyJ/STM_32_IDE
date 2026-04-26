@@ -54,6 +54,7 @@ from stm32_block_ide import (  # noqa: E402
     ValidationError,
     _is_valid_stm32_pin,
     _try_eval_param,
+    _validate_block,
     simulate_model,
     validate_model,
 )
@@ -1524,7 +1525,7 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    # Extended to 36 blocks including all new group A-F blocks.
+    # Extended to 39 blocks including all new group A-F blocks + LTI blocks.
     expected = {
         "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
         "Sum", "Product", "Constant",
@@ -1541,6 +1542,8 @@ def test_catalog_now_has_eight_block_types():
         "Lookup1D",
         # Group F STM32 HAL
         "ADC", "DAC", "PWMOut", "TimerTick",
+        # LTI blocks
+        "StateSpace", "DiscreteStateSpace", "ZeroPoleGain",
     }
     assert set(BLOCK_CATALOG.keys()) == expected
 
@@ -4095,6 +4098,253 @@ def test_validate_timertick_valid():
 def test_validate_timertick_negative_scale_valid():
     # Negative scale is allowed (just != 0)
     assert validate_model(_model([_timertick("TT", scale="-0.001")])) == []
+
+
+# ---------------------------------------------------------------------------
+# 24. LTI blocks — StateSpace, DiscreteStateSpace, ZeroPoleGain
+# ---------------------------------------------------------------------------
+
+
+def _ss(bid, A="0 1; -2 -3", B="0; 1", C="1 0", D="0",
+        ic="", method="euler"):
+    return {"id": bid, "type": "StateSpace",
+            "params": {"A": A, "B": B, "C": C, "D": D,
+                       "initial_state": ic, "method": method},
+            "x": 0.0, "y": 0.0}
+
+def _dss(bid, Ad="0.99 0.01; -0.02 0.97", Bd="0; 0.01",
+         Cd="1 0", Dd="0", ic=""):
+    return {"id": bid, "type": "DiscreteStateSpace",
+            "params": {"Ad": Ad, "Bd": Bd, "Cd": Cd, "Dd": Dd,
+                       "initial_state": ic},
+            "x": 0.0, "y": 0.0}
+
+def _zpk(bid, zeros="", poles="-1", gain="1.0"):
+    return {"id": bid, "type": "ZeroPoleGain",
+            "params": {"zeros": zeros, "poles": poles, "gain": gain},
+            "x": 0.0, "y": 0.0}
+
+
+# ── StateSpace ──────────────────────────────────────────────────────────────
+
+def test_catalog_contains_lti_blocks():
+    for name in ("StateSpace", "DiscreteStateSpace", "ZeroPoleGain"):
+        assert name in BLOCK_CATALOG, f"{name} missing from BLOCK_CATALOG"
+
+
+def test_validate_statespace_valid():
+    b = _ss("SS1")
+    errs = _validate_block(b)
+    assert errs == []
+
+
+def test_validate_statespace_bad_A():
+    b = _ss("SS1", A="abc")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E001" in codes
+
+
+def test_validate_statespace_bad_method():
+    b = _ss("SS1", method="runge-kutta")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E003" in codes
+
+
+def test_validate_statespace_bad_ic():
+    b = _ss("SS1", ic="abc def")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E001" in codes
+
+
+def test_simulate_statespace_first_order():
+    """First-order system: dx/dt = -x + u, y = x. Step input."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")  # constant 1
+    b_ss   = _ss("SS1", A="-1", B="1", C="1", D="0", method="euler")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_ss, b_sc],
+                    [_wire("SRC","y","SS1","u"), _wire("SS1","y","SC","u0")])
+    t, sigs = simulate_model(model, duration_s=5.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Steady-state for dx/dt=-x+1 is y=1.0
+    assert abs(y[-1] - 1.0) < 0.05
+
+
+def test_simulate_statespace_zero_ic_second_order():
+    """Second-order integrator chain with zero IC: should give ramp-then-curve output."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    # A=[0 1; 0 0], B=[0;1], C=[1 0]: double integrator
+    b_ss   = _ss("SS2", A="0 1; 0 0", B="0; 1", C="1 0", D="0", method="euler")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_ss, b_sc],
+                    [_wire("SRC","y","SS2","u"), _wire("SS2","y","SC","u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # y should be approximately t²/2 at t=1 → 0.5
+    assert 0.3 < y[-1] < 0.7
+
+
+def test_simulate_statespace_D_feedthrough():
+    """D != 0: y = C*x + D*u; at t=0 with zero IC, y[0] = D*u[0]."""
+    b_step = _sw("SRC", amplitude="2.0", duty="1.0")
+    b_ss   = _ss("SS1", A="-1", B="1", C="0", D="3.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_ss, b_sc],
+                    [_wire("SRC","y","SS1","u"), _wire("SS1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # y[0] = D*u[0] = 3*2 = 6
+    assert abs(y[0] - 6.0) < 0.1
+
+
+# ── DiscreteStateSpace ───────────────────────────────────────────────────────
+
+def test_validate_discrete_statespace_valid():
+    b = _dss("DSS1")
+    errs = _validate_block(b)
+    assert errs == []
+
+
+def test_validate_discrete_statespace_bad_Ad():
+    b = _dss("DSS1", Ad="x y; z w")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E001" in codes
+
+
+def test_simulate_discrete_ss_unity():
+    """Ad=1, Bd=dt, Cd=1, Dd=0 → integrator approximation."""
+    dt = 0.01
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    # Ad=1, Bd=0.01, Cd=1, Dd=0  →  x[k+1] = x[k] + 0.01*u, y=x (discrete integrator)
+    b_dss  = _dss("DSS1", Ad="1", Bd="0.01", Cd="1", Dd="0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_dss, b_sc],
+                    [_wire("SRC","y","DSS1","u"), _wire("DSS1","y","SC","u0")])
+    t, sigs = simulate_model(model, duration_s=1.0, step_s=dt)
+    y = sigs["SC.u0"]
+    # Should approximate t → y[-1] ≈ 1.0 (minus one step)
+    assert 0.9 < y[-1] < 1.1
+
+
+def test_simulate_discrete_ss_initial_condition():
+    """Non-zero IC: output starts at IC."""
+    b_step = _sw("SRC", amplitude="0.0", duty="1.0")  # zero input
+    b_dss  = _dss("DSS1", Ad="0.9", Bd="0", Cd="1", Dd="0", ic="5.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_dss, b_sc],
+                    [_wire("SRC","y","DSS1","u"), _wire("DSS1","y","SC","u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    # y[0] = Cd*x[0] + Dd*u[0] = 1*5 + 0*0 = 5
+    assert abs(y[0] - 5.0) < 0.1
+    # y decays geometrically: y[-1] < 5
+    assert y[-1] < y[0]
+
+
+# ── ZeroPoleGain ─────────────────────────────────────────────────────────────
+
+def test_validate_zpk_valid():
+    b = _zpk("ZPK1")
+    errs = _validate_block(b)
+    assert errs == []
+
+
+def test_validate_zpk_empty_poles():
+    b = _zpk("ZPK1", poles="")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E001" in codes
+
+
+def test_validate_zpk_zero_gain():
+    b = _zpk("ZPK1", gain="0")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E002" in codes
+
+
+def test_validate_zpk_bad_poles():
+    b = _zpk("ZPK1", poles="abc")
+    errs = _validate_block(b)
+    codes = [e.code for e in errs]
+    assert "E001" in codes
+
+
+def test_simulate_zpk_first_order_step():
+    """ZPK with pole at -1 and gain 1: H(s) = 1/(s+1), step response → 1-e^-t."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_zpk  = _zpk("ZPK1", zeros="", poles="-1", gain="1.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_zpk, b_sc],
+                    [_wire("SRC","y","ZPK1","u"), _wire("ZPK1","y","SC","u0")])
+    t, sigs = simulate_model(model, duration_s=5.0, step_s=0.001)
+    y = sigs["SC.u0"]
+    # Steady state for H(s)=1/(s+1) with unit step = 1.0
+    assert abs(y[-1] - 1.0) < 0.05
+
+
+def test_simulate_zpk_gain_scaling():
+    """ZPK with gain=2: output should be 2x compared to gain=1."""
+    b_step  = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_zpk1  = _zpk("ZPK1", poles="-1", gain="1.0")
+    b_zpk2  = _zpk("ZPK2", poles="-1", gain="2.0")
+    b_sc1   = _scope("SC1")
+    b_sc2   = _scope("SC2")
+    model   = _model([b_step, b_zpk1, b_zpk2, b_sc1, b_sc2],
+                     [_wire("SRC","y","ZPK1","u"), _wire("ZPK1","y","SC1","u0"),
+                      _wire("SRC","y","ZPK2","u"), _wire("ZPK2","y","SC2","u0")])
+    _, sigs = simulate_model(model, duration_s=5.0, step_s=0.001)
+    y1 = sigs["SC1.u0"]
+    y2 = sigs["SC2.u0"]
+    assert abs(y2[-1] - 2 * y1[-1]) < 0.1
+
+
+# ── Codegen: StateSpace ───────────────────────────────────────────────────────
+
+def test_codegen_statespace_first_order():
+    """StateSpace codegen should include _ss_x_ state variable and matrix multiply."""
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_ss   = _ss("SS1", A="-1", B="1", C="1", D="0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_ss, b_sc],
+                    [_wire("SRC","y","SS1","u"), _wire("SS1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "_ss_x_SS1" in src
+
+
+def test_codegen_discrete_ss():
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_dss  = _dss("DSS1", Ad="0.99", Bd="0.01", Cd="1", Dd="0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_dss, b_sc],
+                    [_wire("SRC","y","DSS1","u"), _wire("DSS1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "_ss_x_DSS1" in src
+
+
+def test_codegen_zpk():
+    b_step = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_zpk  = _zpk("ZPK1", poles="-1", gain="1.0")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_zpk, b_sc],
+                    [_wire("SRC","y","ZPK1","u"), _wire("ZPK1","y","SC","u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        proj = generate_project(Path(d), model, FakeWorkspace())
+        src = (proj / "main.c").read_text()
+    assert "ZeroPoleGain" in src or "_zpk_s_ZPK1" in src
 
 
 # ---------------------------------------------------------------------------

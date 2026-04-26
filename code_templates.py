@@ -108,6 +108,14 @@ def _wires(model: dict) -> Dict[Tuple[str, str], Tuple[str, str]]:
             for c in model["connections"]}
 
 
+def _ss_order(b: dict) -> int:
+    """Return the number of states for a StateSpace or DiscreteStateSpace block."""
+    A_key = "A" if b["type"] == "StateSpace" else "Ad"
+    A_str = b["params"].get(A_key, "0")
+    rows = [r.strip() for r in A_str.split(";") if r.strip()]
+    return max(1, len(rows))
+
+
 def _bilinear_tf(num_s_str: str, den_s_str: str, fs: float):
     """Convert a continuous-time transfer function to discrete using the
     bilinear (Tustin) transform.
@@ -228,6 +236,17 @@ def _emit_decls(blocks: List[dict]) -> str:
             decls.append(f"static float _state_{b['id']} = 0.0f;")
         # Group E Lookup
         elif b["type"] == "Lookup1D":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        elif b["type"] in ("StateSpace", "DiscreteStateSpace"):
+            ns = _ss_order(b)  # helper — see below
+            ic_str = b["params"].get("initial_state", "").strip()
+            ic_vals = ([float(v) for v in ic_str.split()] if ic_str else [0.0]*ns)
+            # Pad or truncate to ns
+            ic_vals = (ic_vals + [0.0]*ns)[:ns]
+            ic_init = ", ".join(f"{v:.10f}f" for v in ic_vals)
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _ss_x_{b['id']}[{ns}] = {{{ic_init}}};")
+        elif b["type"] == "ZeroPoleGain":
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
         # GpioOut, Scope, ToWorkspace, DAC, PWMOut: no signal output
     return "\n".join(decls)
@@ -896,6 +915,127 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
             lines.append( "        }")
             lines.append(f"        {_sig_var(bid,'y')} = _y_{bid};")
             lines.append( "    }")
+
+        # ── State Space ──────────────────────────────────────────────────────
+        elif t == "StateSpace":
+            u_expr  = get_input(bid, "u")
+            A_str   = p.get("A", "0")
+            B_str   = p.get("B", "1")
+            C_str   = p.get("C", "1")
+            D_val   = float(p.get("D", "0"))
+            method  = p.get("method", "euler").strip().lower()
+            try:
+                import numpy as _np
+                def _pm(s):
+                    rows = [r.strip() for r in s.split(";") if r.strip()]
+                    return _np.array([[float(v) for v in r.split()] for r in rows], dtype=float)
+                A_mat = _pm(A_str)
+                B_mat = _pm(B_str)
+                C_mat = _pm(C_str)
+                ns    = A_mat.shape[0]
+                B_vec = B_mat.flatten()[:ns]
+                C_vec = C_mat.flatten()[:ns]
+                # Discretize
+                if method == "zoh":
+                    try:
+                        from scipy.signal import cont2discrete as _c2d
+                        _sys = (A_mat, B_vec.reshape(-1,1),
+                                C_vec.reshape(1,-1), _np.array([[D_val]]))
+                        Ad, Bd_m, _, _, _ = _c2d(_sys, dt_s, method="zoh")
+                        Ad = Ad
+                        Bd = Bd_m.flatten()
+                    except Exception:
+                        Ad = _np.eye(ns) + A_mat * dt_s
+                        Bd = B_vec * dt_s
+                else:
+                    Ad = _np.eye(ns) + A_mat * dt_s
+                    Bd = B_vec * dt_s
+                lines.append(f"    /* block {bid}: StateSpace n={ns} */")
+                lines.append(f"    {{")
+                lines.append(f"        float _u = {u_expr};")
+                lines.append(f"        float _xnew[{ns}];")
+                for i in range(ns):
+                    row_terms = " + ".join(
+                        f"{Ad[i,j]:.10f}f * _ss_x_{bid}[{j}]" for j in range(ns))
+                    lines.append(f"        _xnew[{i}] = {Bd[i]:.10f}f * _u + {row_terms};")
+                c_terms = " + ".join(f"{C_vec[j]:.10f}f * _ss_x_{bid}[{j}]" for j in range(ns))
+                lines.append(f"        {_sig_var(bid,'y')} = {c_terms} + {D_val:.10f}f * _u;")
+                lines.append(f"        for (int _i = 0; _i < {ns}; _i++) _ss_x_{bid}[_i] = _xnew[_i];")
+                lines.append(f"    }}")
+            except Exception as exc:
+                lines.append(f"    /* block {bid}: StateSpace — codegen error: {exc} */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;")
+
+        # ── Discrete State Space ──────────────────────────────────────────────
+        elif t == "DiscreteStateSpace":
+            u_expr = get_input(bid, "u")
+            Ad_str = p.get("Ad", "1")
+            Bd_str = p.get("Bd", "1")
+            Cd_str = p.get("Cd", "1")
+            Dd_val = float(p.get("Dd", "0"))
+            try:
+                import numpy as _np
+                def _pm(s):
+                    rows = [r.strip() for r in s.split(";") if r.strip()]
+                    return _np.array([[float(v) for v in r.split()] for r in rows], dtype=float)
+                Ad = _pm(Ad_str)
+                Bd_mat = _pm(Bd_str)
+                Cd_mat = _pm(Cd_str)
+                ns     = Ad.shape[0]
+                Bd     = Bd_mat.flatten()[:ns]
+                Cd     = Cd_mat.flatten()[:ns]
+                lines.append(f"    /* block {bid}: DiscreteStateSpace n={ns} */")
+                lines.append(f"    {{")
+                lines.append(f"        float _u = {u_expr};")
+                lines.append(f"        float _xnew[{ns}];")
+                for i in range(ns):
+                    row_terms = " + ".join(
+                        f"{Ad[i,j]:.10f}f * _ss_x_{bid}[{j}]" for j in range(ns))
+                    lines.append(f"        _xnew[{i}] = {Bd[i]:.10f}f * _u + {row_terms};")
+                c_terms = " + ".join(f"{Cd[j]:.10f}f * _ss_x_{bid}[{j}]" for j in range(ns))
+                lines.append(f"        {_sig_var(bid,'y')} = {c_terms} + {Dd_val:.10f}f * _u;")
+                lines.append(f"        for (int _i = 0; _i < {ns}; _i++) _ss_x_{bid}[_i] = _xnew[_i];")
+                lines.append(f"    }}")
+            except Exception as exc:
+                lines.append(f"    /* block {bid}: DiscreteStateSpace — codegen error: {exc} */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;")
+
+        # ── Zero-Pole-Gain ────────────────────────────────────────────────────
+        elif t == "ZeroPoleGain":
+            u_expr    = get_input(bid, "u")
+            zeros_str = p.get("zeros", "").strip()
+            poles_str = p.get("poles", "-1").strip()
+            gain      = float(p.get("gain", "1.0"))
+            try:
+                import numpy as _np
+                z     = _np.array([float(v) for v in zeros_str.split()]) if zeros_str else _np.array([])
+                p_arr = _np.array([float(v) for v in poles_str.split()])
+                num_s = " ".join(str(c) for c in _np.atleast_1d(_np.real(_np.poly(z)) * gain))
+                den_s = " ".join(str(c) for c in _np.atleast_1d(_np.real(_np.poly(p_arr))))
+                bz, az = _bilinear_tf(num_s, den_s, 1.0 / dt_s)
+                order  = len(az) - 1
+                lines.append(f"    /* block {bid}: ZeroPoleGain order={order} */")
+                if order == 0:
+                    lines.append(f"    {_sig_var(bid,'y')} = {bz[0]:.10f}f * {u_expr};")
+                else:
+                    # Direct Form II Transposed
+                    sv = f"_zpk_s_{bid}"
+                    lines.append(f"    static float {sv}[{order}] = {{0}};")
+                    lines.append(f"    {{")
+                    lines.append(f"        float _u = {u_expr};")
+                    lines.append(f"        float _y = {bz[0]:.10f}f * _u + {sv}[0];")
+                    for j in range(order - 1):
+                        lines.append(
+                            f"        {sv}[{j}] = {bz[j+1]:.10f}f * _u "
+                            f"- {az[j+1]:.10f}f * _y + {sv}[{j+1}];")
+                    lines.append(
+                        f"        {sv}[{order-1}] = {bz[order]:.10f}f * _u "
+                        f"- {az[order]:.10f}f * _y;")
+                    lines.append(f"        {_sig_var(bid,'y')} = _y;")
+                    lines.append(f"    }}")
+            except Exception as exc:
+                lines.append(f"    /* block {bid}: ZeroPoleGain — codegen error: {exc} */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;")
 
         # ---- Group F: STM32 HAL --------------------------------------------
 
