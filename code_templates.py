@@ -248,7 +248,26 @@ def _emit_decls(blocks: List[dict]) -> str:
             decls.append(f"static float _ss_x_{b['id']}[{ns}] = {{{ic_init}}};")
         elif b["type"] == "ZeroPoleGain":
             decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
-        # GpioOut, Scope, ToWorkspace, DAC, PWMOut: no signal output
+        # New blocks
+        elif b["type"] == "Ground":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+        elif b["type"] == "Relay":
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static uint8_t _relay_state_{b['id']} = 0;")
+        elif b["type"] in ("CompareToConstant", "DetectRisePositive",
+                           "SaturationDynamic", "MultiportSwitch", "TransportDelay",
+                           "I2CRead"):
+            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            if b["type"] == "DetectRisePositive":
+                ic = float(b["params"].get("initial_condition", "0.0"))
+                decls.append(f"static float _drp_prev_{b['id']} = {ic:.10f}f;")
+            elif b["type"] == "TransportDelay":
+                delay = max(1, int(float(b["params"].get("delay_samples", "10"))))
+                ic    = float(b["params"].get("initial_condition", "0.0"))
+                ic_init = ", ".join([f"{ic:.10f}f"] * delay)
+                decls.append(f"static float _td_buf_{b['id']}[{delay}] = {{{ic_init}}};")
+                decls.append(f"static uint32_t _td_idx_{b['id']} = 0;")
+        # GpioOut, Scope, ToWorkspace, DAC, PWMOut, UARTSend, I2CWrite: no signal output
     return "\n".join(decls)
 
 
@@ -1086,6 +1105,131 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
                 f"            (uint32_t)((_duty_{bid} / {max_duty:.6f}f) * _arr_{bid}));"
             )
             lines.append( "    }")
+
+        # ---- New blocks --------------------------------------------------------
+
+        elif t == "Ground":
+            lines.append(f"    {_sig_var(bid,'y')} = 0.0f;  /* Ground */")
+
+        elif t == "Relay":
+            u_expr  = get_input(bid, "u")
+            on_thr  = float(p.get("on_threshold",  "0.5"))
+            off_thr = float(p.get("off_threshold", "-0.5"))
+            on_val  = float(p.get("on_value",  "1.0"))
+            off_val = float(p.get("off_value", "0.0"))
+            lines.append(f"    /* block {bid}: Relay */")
+            lines.append(f"    if ({u_expr} >= {on_thr:.10f}f)  _relay_state_{bid} = 1;")
+            lines.append(f"    else if ({u_expr} <= {off_thr:.10f}f) _relay_state_{bid} = 0;")
+            lines.append(f"    {_sig_var(bid,'y')} = _relay_state_{bid} ? {on_val:.10f}f : {off_val:.10f}f;")
+
+        elif t == "CompareToConstant":
+            u_expr = get_input(bid, "u")
+            op     = p.get("operator", "==").strip()
+            const  = float(p.get("constant", "0.0"))
+            c_ops  = {"==": "==", "!=": "!=", "<": "<", ">": ">", "<=": "<=", ">=": ">="}
+            c_op   = c_ops.get(op, "==")
+            lines.append(f"    /* block {bid}: CompareToConstant {op} {const} */")
+            lines.append(f"    {_sig_var(bid,'y')} = ({u_expr}) {c_op} {const:.10f}f ? 1.0f : 0.0f;")
+
+        elif t == "DetectRisePositive":
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: DetectRisePositive */")
+            lines.append(f"    {{")
+            lines.append(f"        float _u = {u_expr};")
+            lines.append(f"        {_sig_var(bid,'y')} = (_drp_prev_{bid} <= 0.0f && _u > 0.0f) ? 1.0f : 0.0f;")
+            lines.append(f"        _drp_prev_{bid} = _u;")
+            lines.append(f"    }}")
+
+        elif t == "SaturationDynamic":
+            u_expr  = get_input(bid, "u")
+            hi_expr = get_input(bid, "upper")
+            lo_expr = get_input(bid, "lower")
+            lines.append(f"    /* block {bid}: SaturationDynamic */")
+            lines.append(f"    {{")
+            lines.append(f"        float _u = {u_expr}, _hi = {hi_expr}, _lo = {lo_expr};")
+            lines.append(f"        {_sig_var(bid,'y')} = _u < _lo ? _lo : (_u > _hi ? _hi : _u);")
+            lines.append(f"    }}")
+
+        elif t == "MultiportSwitch":
+            sel_expr = get_input(bid, "sel")
+            ni       = max(2, min(4, int(float(p.get("num_inputs", "4")))))
+            lines.append(f"    /* block {bid}: MultiportSwitch {ni} inputs */")
+            lines.append(f"    {{")
+            lines.append(f"        int _sel = (int)({sel_expr} + 0.5f);")
+            lines.append(f"        if (_sel < 0) _sel = 0;")
+            lines.append(f"        if (_sel >= {ni}) _sel = {ni-1};")
+            lines.append(f"        switch (_sel) {{")
+            for i in range(ni):
+                lines.append(f"            case {i}: {_sig_var(bid,'y')} = {get_input(bid, f'u{i}')}; break;")
+            lines.append(f"            default: {_sig_var(bid,'y')} = {get_input(bid, 'u0')}; break;")
+            lines.append(f"        }}")
+            lines.append(f"    }}")
+
+        elif t == "TransportDelay":
+            u_expr = get_input(bid, "u")
+            delay  = max(1, int(float(p.get("delay_samples", "10"))))
+            lines.append(f"    /* block {bid}: TransportDelay {delay} samples */")
+            lines.append(f"    {{")
+            lines.append(f"        {_sig_var(bid,'y')} = _td_buf_{bid}[_td_idx_{bid}];")
+            lines.append(f"        _td_buf_{bid}[_td_idx_{bid}] = {u_expr};")
+            lines.append(f"        _td_idx_{bid} = (_td_idx_{bid} + 1) % {delay}u;")
+            lines.append(f"    }}")
+
+        elif t == "UARTSend":
+            u_expr  = get_input(bid, "u")
+            usart   = p.get("usart", "USART1").strip()
+            fmt     = p.get("format", "%.4f\\r\\n").strip()
+            timeout = int(float(p.get("timeout", "10")))
+            handle  = "h" + usart.lower()
+            lines.append(f"    /* block {bid}: UARTSend {usart} */")
+            lines.append(f"    /* extern UART_HandleTypeDef {handle}; must be declared */")
+            lines.append(f"    {{")
+            lines.append(f"        char _uart_buf_{bid}[32];")
+            lines.append(f"        int _n = snprintf(_uart_buf_{bid}, sizeof(_uart_buf_{bid}), \"{fmt}\", (double)({u_expr}));")
+            lines.append(f"        if (_n > 0) HAL_UART_Transmit(&{handle}, (uint8_t*)_uart_buf_{bid}, (uint16_t)_n, {timeout}U);")
+            lines.append(f"    }}")
+
+        elif t == "I2CRead":
+            i2c    = p.get("i2c", "I2C1").strip()
+            dev    = p.get("device_addr", "0x48").strip()
+            reg    = p.get("reg_addr", "0x00").strip()
+            dbytes = int(float(p.get("data_bytes", "2")))
+            scale  = float(p.get("scale", "1.0"))
+            handle = "h" + i2c.lower()
+            dev_shifted = hex(int(dev, 0) << 1)
+            lines.append(f"    /* block {bid}: I2CRead {i2c} dev={dev} reg={reg} */")
+            lines.append(f"    {{")
+            lines.append(f"        uint8_t _buf_{bid}[2] = {{0}};")
+            lines.append(f"        if (HAL_I2C_Mem_Read(&{handle}, {dev_shifted}, {reg}, I2C_MEMADD_SIZE_8BIT,")
+            lines.append(f"                             _buf_{bid}, {dbytes}U, 10) == HAL_OK) {{")
+            if dbytes == 2:
+                lines.append(f"            uint16_t _raw = ((uint16_t)_buf_{bid}[0] << 8) | _buf_{bid}[1];")
+                lines.append(f"            {_sig_var(bid,'y')} = (float)_raw * {scale:.10f}f;")
+            else:
+                lines.append(f"            {_sig_var(bid,'y')} = (float)_buf_{bid}[0] * {scale:.10f}f;")
+            lines.append(f"        }}")
+            lines.append(f"    }}")
+
+        elif t == "I2CWrite":
+            u_expr = get_input(bid, "u")
+            i2c    = p.get("i2c", "I2C1").strip()
+            dev    = p.get("device_addr", "0x48").strip()
+            reg    = p.get("reg_addr", "0x00").strip()
+            dbytes = int(float(p.get("data_bytes", "2")))
+            scale  = float(p.get("scale", "1.0"))
+            handle = "h" + i2c.lower()
+            dev_shifted = hex(int(dev, 0) << 1)
+            max_val = 255 if dbytes == 1 else 65535
+            lines.append(f"    /* block {bid}: I2CWrite {i2c} dev={dev} reg={reg} */")
+            lines.append(f"    {{")
+            lines.append(f"        float _raw_f = ({u_expr}) / {scale:.10f}f;")
+            lines.append(f"        if (_raw_f < 0.0f) _raw_f = 0.0f;")
+            lines.append(f"        if (_raw_f > {max_val}.0f) _raw_f = {max_val}.0f;")
+            lines.append(f"        uint{8 if dbytes==1 else 16}_t _raw = (uint{8 if dbytes==1 else 16}_t)_raw_f;")
+            lines.append(f"        uint8_t _buf_{bid}[2] = {{(uint8_t)(_raw >> 8), (uint8_t)(_raw & 0xFF)}};")
+            lines.append(f"        HAL_I2C_Mem_Write(&{handle}, {dev_shifted}, {reg}, I2C_MEMADD_SIZE_8BIT,")
+            lines.append(f"                          _buf_{bid}, {dbytes}U, 10);")
+            lines.append(f"    }}")
 
     return "\n".join(lines), streamed
 

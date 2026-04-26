@@ -790,6 +790,17 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
         ),
     ),
 
+    # ---- Group G2: Ground (Source) -----------------------------------------
+
+    "Ground": BlockSpec(
+        type_name="Ground",
+        display_name="Ground",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Outputs a constant zero. Use to terminate unconnected input ports.",
+    ),
+
     # ---- Group H: New Math --------------------------------------------------
 
     "MathFunction": BlockSpec(
@@ -981,6 +992,168 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "mode='position': y = counter / counts_per_rev * 2*pi (radians, wraps). "
             "mode='velocity': y = delta_counts / counts_per_rev * 2*pi / step_s (rad/s). "
             "Set the timer up in CubeMX as Encoder Mode (TI1TI2)."
+        ),
+    ),
+
+    # ---- Group M: Discontinuities ------------------------------------------
+
+    "Relay": BlockSpec(
+        type_name="Relay",
+        display_name="Relay",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "on_threshold":  ("0.5",  "Input level above which output switches to on_value"),
+            "off_threshold": ("-0.5", "Input level below which output switches to off_value"),
+            "on_value":      ("1.0",  "Output value when relay is on"),
+            "off_value":     ("0.0",  "Output value when relay is off"),
+        },
+        description=(
+            "Hysteresis on/off switch. Output switches to on_value when input exceeds "
+            "on_threshold, and to off_value when input falls below off_threshold. "
+            "Between the two thresholds the output holds its previous value."
+        ),
+    ),
+
+    "SaturationDynamic": BlockSpec(
+        type_name="SaturationDynamic",
+        display_name="Saturation Dynamic",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in"), PortSpec("upper", "in"), PortSpec("lower", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "default_upper": ("1.0",  "Default upper limit if upper port is unconnected"),
+            "default_lower": ("-1.0", "Default lower limit if lower port is unconnected"),
+        },
+        description=(
+            "Clamps input u to [lower, upper] where limits come from input ports. "
+            "If limit ports are unconnected, the default parameter values are used."
+        ),
+    ),
+
+    # ---- Group N: Logic (Signal Routing) -----------------------------------
+
+    "CompareToConstant": BlockSpec(
+        type_name="CompareToConstant",
+        display_name="Compare To Constant",
+        color="#27ae60",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": ("==", "Comparison operator: == | != | < | > | <= | >="),
+            "constant": ("0.0", "Constant value to compare against"),
+        },
+        description="y = 1.0 if (u operator constant) is true, else 0.0.",
+    ),
+
+    "DetectRisePositive": BlockSpec(
+        type_name="DetectRisePositive",
+        display_name="Detect Rise Positive",
+        color="#27ae60",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Assumed value of input at t<0"),
+        },
+        description=(
+            "Outputs 1.0 for exactly one sample step when the input transitions "
+            "from <= 0 to > 0. Output is 0.0 at all other times."
+        ),
+    ),
+
+    "MultiportSwitch": BlockSpec(
+        type_name="MultiportSwitch",
+        display_name="Multiport Switch",
+        color="#27ae60",
+        inputs=[PortSpec("sel", "in"),
+                PortSpec("u0", "in"), PortSpec("u1", "in"),
+                PortSpec("u2", "in"), PortSpec("u3", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "num_inputs": ("4", "Number of data inputs to use (2–4). Extra ports are ignored."),
+        },
+        description=(
+            "Selects one of up to 4 data inputs based on the sel input. "
+            "sel is rounded to the nearest integer and clamped to [0, num_inputs-1]. "
+            "sel=0 → u0, sel=1 → u1, sel=2 → u2, sel=3 → u3."
+        ),
+    ),
+
+    # ---- Group O: Discrete (new) -------------------------------------------
+
+    "TransportDelay": BlockSpec(
+        type_name="TransportDelay",
+        display_name="Transport Delay",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "delay_samples":     ("10",  "Number of samples to delay (integer >= 1)"),
+            "initial_condition": ("0.0", "Output value during the initial delay period"),
+        },
+        description=(
+            "Delays the input signal by a fixed number of samples. "
+            "During the first delay_samples steps the output equals initial_condition."
+        ),
+    ),
+
+    # ---- Group P: STM32 HAL (new) ------------------------------------------
+
+    "UARTSend": BlockSpec(
+        type_name="UARTSend",
+        display_name="UART Send",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "usart":   ("USART1", "HAL USART handle name (e.g. USART1, USART2)"),
+            "format":  ("%.4f\r\n", "printf-style format string for the value"),
+            "timeout": ("10",     "HAL_UART_Transmit timeout in ms"),
+        },
+        description=(
+            "Transmits the input value over a UART port each model step. "
+            "Uses HAL_UART_Transmit with snprintf formatting. "
+            "In simulation, the input is captured and shown in the scope display."
+        ),
+    ),
+
+    "I2CRead": BlockSpec(
+        type_name="I2CRead",
+        display_name="I2C Read",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "i2c":         ("I2C1",  "HAL I2C handle name (e.g. I2C1)"),
+            "device_addr": ("0x48",  "7-bit I2C device address (will be left-shifted by 1)"),
+            "reg_addr":    ("0x00",  "Register address to read from"),
+            "data_bytes":  ("2",     "Number of bytes to read (1 or 2)"),
+            "scale":       ("1.0",   "Scale factor applied to raw value: y = raw * scale"),
+            "sim_value":   ("0.0",   "Constant output value used during simulation"),
+        },
+        description=(
+            "Reads 1 or 2 bytes from an I2C device register each model step. "
+            "For 2 bytes, MSB first (big-endian). "
+            "y = (uint16_raw) * scale. "
+            "Uses HAL_I2C_Mem_Read."
+        ),
+    ),
+
+    "I2CWrite": BlockSpec(
+        type_name="I2CWrite",
+        display_name="I2C Write",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "i2c":         ("I2C1",  "HAL I2C handle name (e.g. I2C1)"),
+            "device_addr": ("0x48",  "7-bit I2C device address (will be left-shifted by 1)"),
+            "reg_addr":    ("0x00",  "Register address to write to"),
+            "data_bytes":  ("2",     "Number of bytes to write (1 or 2)"),
+            "scale":       ("1.0",   "Scale factor: raw = (uint16_t)(u / scale)"),
+        },
+        description=(
+            "Writes 1 or 2 bytes to an I2C device register each model step. "
+            "For 2 bytes, MSB first (big-endian). raw = clamp(u/scale, 0, 65535). "
+            "Uses HAL_I2C_Mem_Write. In simulation the input is passed through for display."
         ),
     ),
 }
@@ -2518,6 +2691,96 @@ def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
         if mode not in ("position", "velocity"): _bad("mode", "E003", "mode must be 'position' or 'velocity'")
         if _num("sim_value", "0.0") is None: _bad("sim_value", "E001", "Must be a valid number")
 
+    # ---- Ground -------------------------------------------------------------
+    elif btype == "Ground":
+        pass
+
+    # ---- Relay --------------------------------------------------------------
+    elif btype == "Relay":
+        on_t  = _num("on_threshold",  "0.5")
+        off_t = _num("off_threshold", "-0.5")
+        if on_t  is None: _bad("on_threshold",  "E001", "Must be a valid number")
+        if off_t is None: _bad("off_threshold", "E001", "Must be a valid number")
+        if on_t is not None and off_t is not None and off_t >= on_t:
+            _bad("off_threshold", "E007", "off_threshold must be strictly less than on_threshold")
+        if _num("on_value",  "1.0") is None: _bad("on_value",  "E001", "Must be a valid number")
+        if _num("off_value", "0.0") is None: _bad("off_value", "E001", "Must be a valid number")
+
+    # ---- CompareToConstant --------------------------------------------------
+    elif btype == "CompareToConstant":
+        op = p.get("operator", "==").strip()
+        if op not in ("==", "!=", "<", ">", "<=", ">="):
+            _bad("operator", "E003", "operator must be one of: ==, !=, <, >, <=, >=")
+        if _num("constant", "0.0") is None:
+            _bad("constant", "E001", "Must be a valid number")
+
+    # ---- DetectRisePositive -------------------------------------------------
+    elif btype == "DetectRisePositive":
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- SaturationDynamic --------------------------------------------------
+    elif btype == "SaturationDynamic":
+        if _num("default_upper",  "1.0") is None: _bad("default_upper",  "E001", "Must be a valid number")
+        if _num("default_lower", "-1.0") is None: _bad("default_lower", "E001", "Must be a valid number")
+        ul = _num("default_upper",  "1.0")
+        ll = _num("default_lower", "-1.0")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("default_upper", "E007", "default_upper must be greater than default_lower")
+
+    # ---- MultiportSwitch ----------------------------------------------------
+    elif btype == "MultiportSwitch":
+        ni = _num("num_inputs", "4")
+        if ni is None: _bad("num_inputs", "E001", "Must be a valid integer")
+        elif int(ni) < 2 or int(ni) > 4: _bad("num_inputs", "E002", "num_inputs must be 2, 3, or 4")
+
+    # ---- TransportDelay -----------------------------------------------------
+    elif btype == "TransportDelay":
+        ds = _num("delay_samples", "10")
+        if ds is None:       _bad("delay_samples", "E001", "Must be a valid integer")
+        elif int(ds) < 1:    _bad("delay_samples", "E002", "delay_samples must be >= 1")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- UARTSend -----------------------------------------------------------
+    elif btype == "UARTSend":
+        usart = p.get("usart", "").strip()
+        if not usart: _bad("usart", "E003", "usart cannot be empty (e.g. USART1)")
+        fmt = p.get("format", "%.4f\r\n").strip()
+        if not fmt: _bad("format", "E003", "format string cannot be empty")
+        to = _num("timeout", "10")
+        if to is None: _bad("timeout", "E001", "Must be a valid number")
+        elif to <= 0:  _bad("timeout", "E002", "timeout must be > 0 ms")
+
+    # ---- I2CRead ------------------------------------------------------------
+    elif btype == "I2CRead":
+        i2c = p.get("i2c", "").strip()
+        if not i2c: _bad("i2c", "E003", "i2c cannot be empty (e.g. I2C1)")
+        dev = p.get("device_addr", "0x48").strip()
+        try: int(dev, 0)
+        except ValueError: _bad("device_addr", "E001", "Must be a valid hex or decimal address (e.g. 0x48)")
+        reg = p.get("reg_addr", "0x00").strip()
+        try: int(reg, 0)
+        except ValueError: _bad("reg_addr", "E001", "Must be a valid hex or decimal address (e.g. 0x00)")
+        db = _num("data_bytes", "2")
+        if db is None or int(db) not in (1, 2): _bad("data_bytes", "E002", "data_bytes must be 1 or 2")
+        if _num("scale", "1.0") is None: _bad("scale", "E001", "Must be a valid number")
+        if _num("sim_value", "0.0") is None: _bad("sim_value", "E001", "Must be a valid number")
+
+    # ---- I2CWrite -----------------------------------------------------------
+    elif btype == "I2CWrite":
+        i2c = p.get("i2c", "").strip()
+        if not i2c: _bad("i2c", "E003", "i2c cannot be empty (e.g. I2C1)")
+        dev = p.get("device_addr", "0x48").strip()
+        try: int(dev, 0)
+        except ValueError: _bad("device_addr", "E001", "Must be a valid hex or decimal address")
+        reg = p.get("reg_addr", "0x00").strip()
+        try: int(reg, 0)
+        except ValueError: _bad("reg_addr", "E001", "Must be a valid hex or decimal address")
+        db = _num("data_bytes", "2")
+        if db is None or int(db) not in (1, 2): _bad("data_bytes", "E002", "data_bytes must be 1 or 2")
+        if _num("scale", "1.0") is None: _bad("scale", "E001", "Must be a valid number")
+
     return errors
 
 
@@ -2692,6 +2955,13 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
         elif b["type"] == "EncoderRead":
             sim_val = pval(b["params"].get("sim_value", "0.0"))
             outs[(b["id"], "y")] = np.full(n, sim_val)
+
+        elif b["type"] == "Ground":
+            outs[(b["id"], "y")] = np.zeros(n)
+
+        elif b["type"] == "I2CRead":
+            sv = pval(b["params"].get("sim_value", "0.0"))
+            outs[(b["id"], "y")] = np.full(n, sv)
 
     # Build wire map once for all subsequent passes.
     wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
@@ -3108,6 +3378,61 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
             except Exception:
                 outs[(bid, "y")] = np.zeros(n)
 
+        elif b["type"] == "Relay":
+            u_arr    = _input("u")
+            on_thr   = pval(b["params"].get("on_threshold",  "0.5"))
+            off_thr  = pval(b["params"].get("off_threshold", "-0.5"))
+            on_val   = pval(b["params"].get("on_value",  "1.0"))
+            off_val  = pval(b["params"].get("off_value", "0.0"))
+            y = np.empty(n)
+            state = off_val
+            for k in range(n):
+                if u_arr[k] >= on_thr:
+                    state = on_val
+                elif u_arr[k] <= off_thr:
+                    state = off_val
+                y[k] = state
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "CompareToConstant":
+            u_arr = _input("u")
+            op    = b["params"].get("operator", "==").strip()
+            const = pval(b["params"].get("constant", "0.0"))
+            ops   = {"==": np.equal, "!=": np.not_equal, "<": np.less, ">": np.greater,
+                     "<=": np.less_equal, ">=": np.greater_equal}
+            fn = ops.get(op, np.equal)
+            outs[(bid, "y")] = fn(u_arr, const).astype(float)
+
+        elif b["type"] == "DetectRisePositive":
+            u_arr = _input("u")
+            ic    = pval(b["params"].get("initial_condition", "0.0"))
+            prev  = np.concatenate([[ic], u_arr[:-1]])
+            outs[(bid, "y")] = ((prev <= 0) & (u_arr > 0)).astype(float)
+
+        elif b["type"] == "SaturationDynamic":
+            u_arr  = _input("u")
+            hi     = _input("upper", default=pval(b["params"].get("default_upper",  "1.0")))
+            lo     = _input("lower", default=pval(b["params"].get("default_lower", "-1.0")))
+            outs[(bid, "y")] = np.clip(u_arr, lo, hi)
+
+        elif b["type"] == "MultiportSwitch":
+            sel_arr = _input("sel")
+            ni      = max(2, min(4, int(round(pval(b["params"].get("num_inputs", "4"))))))
+            inputs  = [_input(f"u{i}") for i in range(ni)]
+            y = np.empty(n)
+            for k in range(n):
+                idx = int(round(sel_arr[k]))
+                idx = max(0, min(ni - 1, idx))
+                y[k] = inputs[idx][k]
+            outs[(bid, "y")] = y
+
+        elif b["type"] == "TransportDelay":
+            u_arr = _input("u")
+            delay = max(1, int(round(pval(b["params"].get("delay_samples", "10")))))
+            ic    = pval(b["params"].get("initial_condition", "0.0"))
+            pad   = np.full(delay, ic)
+            outs[(bid, "y")] = np.concatenate([pad, u_arr])[:n]
+
     # ToWorkspace: capture signal into the Python workspace and expose it to
     # the Simulate Scope tab so the user can see what was saved.
     for b in model["blocks"]:
@@ -3153,6 +3478,18 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                     thr = pval(b["params"]["threshold"])
                     display[f"{b['id']}.pin"] = (sig > thr).astype(float)
         elif b["type"] in ("DAC", "PWMOut"):
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
+        elif b["type"] == "UARTSend":
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
+        elif b["type"] == "I2CWrite":
             key = (b["id"], "u")
             if key in wires:
                 sig = outs.get(wires[key])

@@ -1525,7 +1525,7 @@ def test_topo_order_product_after_its_sources():
 
 
 def test_catalog_now_has_eight_block_types():
-    # Extended to 53 blocks including all new group A-F blocks + LTI + batch-2 blocks.
+    # Extended to 63 blocks including all new group A-F blocks + LTI + batch-2 + batch-3 blocks.
     expected = {
         "SquareWave", "GpioIn", "GpioOut", "Scope", "Ultrasonic",
         "Sum", "Product", "Constant",
@@ -1551,6 +1551,10 @@ def test_catalog_now_has_eight_block_types():
         "DiscreteTransferFcn", "MovingAverage",
         "Lookup2D",
         "EncoderRead",
+        # Batch 3 — 10 new practical blocks
+        "Ground", "Relay", "CompareToConstant", "DetectRisePositive",
+        "SaturationDynamic", "MultiportSwitch", "TransportDelay",
+        "UARTSend", "I2CRead", "I2CWrite",
     }
     assert set(BLOCK_CATALOG.keys()) == expected
 
@@ -4474,6 +4478,219 @@ def test_codegen_rtos_oskernel_start_in_main():
         src  = (proj / "main.c").read_text()
     assert "osKernelInitialize" in src
     assert "osKernelStart" in src
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: Factory helpers for 10 new practical blocks
+# ---------------------------------------------------------------------------
+
+
+def _ground(bid):
+    return {"id": bid, "type": "Ground", "params": {}, "x": 0, "y": 0}
+
+
+def _relay(bid, on_thr="0.5", off_thr="-0.5", on_val="1.0", off_val="0.0"):
+    return {"id": bid, "type": "Relay",
+            "params": {"on_threshold": on_thr, "off_threshold": off_thr,
+                       "on_value": on_val, "off_value": off_val}, "x": 0, "y": 0}
+
+
+def _ctc(bid, operator="==", constant="0.0"):
+    return {"id": bid, "type": "CompareToConstant",
+            "params": {"operator": operator, "constant": constant}, "x": 0, "y": 0}
+
+
+def _drp(bid, ic="0.0"):
+    return {"id": bid, "type": "DetectRisePositive",
+            "params": {"initial_condition": ic}, "x": 0, "y": 0}
+
+
+def _satdyn(bid, du="1.0", dl="-1.0"):
+    return {"id": bid, "type": "SaturationDynamic",
+            "params": {"default_upper": du, "default_lower": dl}, "x": 0, "y": 0}
+
+
+def _mpsw(bid, num_inputs="4"):
+    return {"id": bid, "type": "MultiportSwitch",
+            "params": {"num_inputs": num_inputs}, "x": 0, "y": 0}
+
+
+def _tdelay(bid, delay_samples="5", ic="0.0"):
+    return {"id": bid, "type": "TransportDelay",
+            "params": {"delay_samples": delay_samples, "initial_condition": ic}, "x": 0, "y": 0}
+
+
+def _uartsend(bid, usart="USART1"):
+    return {"id": bid, "type": "UARTSend",
+            "params": {"usart": usart, "format": "%.4f\\r\\n", "timeout": "10"}, "x": 0, "y": 0}
+
+
+def _i2cread(bid, i2c="I2C1", dev="0x48", reg="0x00"):
+    return {"id": bid, "type": "I2CRead",
+            "params": {"i2c": i2c, "device_addr": dev, "reg_addr": reg,
+                       "data_bytes": "2", "scale": "1.0", "sim_value": "5.0"}, "x": 0, "y": 0}
+
+
+def _i2cwrite(bid, i2c="I2C1", dev="0x48", reg="0x00"):
+    return {"id": bid, "type": "I2CWrite",
+            "params": {"i2c": i2c, "device_addr": dev, "reg_addr": reg,
+                       "data_bytes": "2", "scale": "1.0"}, "x": 0, "y": 0}
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: Tests for 10 new practical blocks
+# ---------------------------------------------------------------------------
+
+
+# Ground
+def test_simulate_ground_outputs_zero():
+    model = _model([_ground("G"), _scope("SC")], [_wire("G", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.all(sigs["SC.u0"] == 0.0)
+
+
+def test_validate_ground_no_errors():
+    assert _validate_block(_ground("G")) == []
+
+
+def test_codegen_ground_outputs_zero():
+    model = _model([_ground("G"), _scope("SC")], [_wire("G", "y", "SC", "u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "0.0f" in src
+
+
+# Relay
+def test_simulate_relay_switches_on():
+    b_sw  = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_rel = _relay("R1", on_thr="0.5", off_thr="-0.5")
+    b_sc  = _scope("SC")
+    model = _model([b_sw, b_rel, b_sc], [_wire("SRC", "y", "R1", "u"), _wire("R1", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.all(sigs["SC.u0"] == 1.0)
+
+
+def test_simulate_relay_holds_state():
+    b_c   = _const("C", "0.0")
+    b_rel = _relay("R1", on_thr="0.5", off_thr="-0.5", off_val="0.0")
+    b_sc  = _scope("SC")
+    model = _model([b_c, b_rel, b_sc], [_wire("C", "y", "R1", "u"), _wire("R1", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.all(sigs["SC.u0"] == 0.0)
+
+
+def test_validate_relay_off_thr_ge_on_thr():
+    b = _relay("R", on_thr="0.0", off_thr="0.5")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E007" in codes
+
+
+# CompareToConstant
+def test_simulate_ctc_greater_than():
+    b_sw  = _sw("SRC", amplitude="2.0", duty="1.0")
+    b_ctc = _ctc("C1", operator=">", constant="1.0")
+    b_sc  = _scope("SC")
+    model = _model([b_sw, b_ctc, b_sc], [_wire("SRC", "y", "C1", "u"), _wire("C1", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.all(sigs["SC.u0"] == 1.0)
+
+
+def test_validate_ctc_bad_operator():
+    b = _ctc("C", operator="???")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E003" in codes
+
+
+# DetectRisePositive
+def test_simulate_detect_rise_positive():
+    b_step = _step("STP", step_time="0.05", initial_value="-1.0", final_value="1.0")
+    b_drp  = _drp("D1")
+    b_sc   = _scope("SC")
+    model  = _model([b_step, b_drp, b_sc],
+                    [_wire("STP", "y", "D1", "u"), _wire("D1", "y", "SC", "u0")])
+    t, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert np.sum(y == 1.0) == 1
+
+
+# TransportDelay
+def test_simulate_transport_delay():
+    b_sw = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_td = _tdelay("TD", delay_samples="10", ic="0.0")
+    b_sc = _scope("SC")
+    model = _model([b_sw, b_td, b_sc], [_wire("SRC", "y", "TD", "u"), _wire("TD", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    y = sigs["SC.u0"]
+    assert y[0] == 0.0
+    assert y[10] == 1.0
+
+
+def test_validate_transport_delay_zero_samples():
+    b = _tdelay("TD", delay_samples="0")
+    codes = [e.code for e in _validate_block(b)]
+    assert "E002" in codes
+
+
+# I2CRead
+def test_simulate_i2cread_returns_sim_value():
+    b_i2c = {"id": "I2C", "type": "I2CRead",
+             "params": {"i2c": "I2C1", "device_addr": "0x48", "reg_addr": "0x00",
+                        "data_bytes": "2", "scale": "1.0", "sim_value": "3.3"},
+             "x": 0, "y": 0}
+    b_sc = _scope("SC")
+    model = _model([b_i2c, b_sc], [_wire("I2C", "y", "SC", "u0")])
+    _, sigs = simulate_model(model, duration_s=0.1, step_s=0.001)
+    assert np.allclose(sigs["SC.u0"], 3.3)
+
+
+def test_validate_i2cread_bad_address():
+    b = {"id": "I2C", "type": "I2CRead",
+         "params": {"i2c": "I2C1", "device_addr": "BADADDR", "reg_addr": "0x00",
+                    "data_bytes": "2", "scale": "1.0", "sim_value": "0.0"}, "x": 0, "y": 0}
+    codes = [e.code for e in _validate_block(b)]
+    assert "E001" in codes
+
+
+# Codegen
+def test_codegen_relay_has_threshold():
+    b_sw  = _sw("SRC", amplitude="1.0", duty="1.0")
+    b_rel = _relay("R1")
+    b_sc  = _scope("SC")
+    model = _model([b_sw, b_rel, b_sc],
+                   [_wire("SRC", "y", "R1", "u"), _wire("R1", "y", "SC", "u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_relay_state_R1" in src
+
+
+def test_codegen_transport_delay_circular_buffer():
+    b_sw = _sw("SRC")
+    b_td = _tdelay("TD")
+    b_sc = _scope("SC")
+    model = _model([b_sw, b_td, b_sc],
+                   [_wire("SRC", "y", "TD", "u"), _wire("TD", "y", "SC", "u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "_td_buf_TD" in src
+
+
+def test_codegen_i2c_read_hal_call():
+    b_i2c = {"id": "I2C", "type": "I2CRead",
+             "params": {"i2c": "I2C1", "device_addr": "0x48", "reg_addr": "0x00",
+                        "data_bytes": "2", "scale": "1.0", "sim_value": "0.0"}, "x": 0, "y": 0}
+    b_sc = _scope("SC")
+    model = _model([b_i2c, b_sc], [_wire("I2C", "y", "SC", "u0")])
+    model["board"] = "NUCLEO-F446RE"
+    model["step_ms"] = 1
+    with tempfile.TemporaryDirectory() as d:
+        src = (generate_project(Path(d), model, FakeWorkspace()) / "main.c").read_text()
+    assert "HAL_I2C_Mem_Read" in src
 
 
 # ---------------------------------------------------------------------------
