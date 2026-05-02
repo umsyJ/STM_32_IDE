@@ -27,7 +27,8 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+import re as _re_top
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # FreeRTOS kernel — auto-download cache
@@ -173,6 +174,82 @@ def _wires(model: dict) -> Dict[Tuple[str, str], Tuple[str, str]]:
             for c in model["connections"]}
 
 
+def _python_to_c(code: str, u_exprs: List[str]) -> "Optional[str]":
+    """Try to transpile a single-line Python math expression to a C expression.
+
+    Returns a C expression string on success, or ``None`` when the code is too
+    complex to auto-translate (multi-line, ``return``/``def``/control-flow, …).
+
+    The translation handles:
+    * ``u[i]``           → the i-th upstream C signal variable
+    * ``math.sin/cos/…`` → sinf/cosf/…
+    * ``math.pi``        → 3.14159265f
+    * ``x**y``           → powf(x, y)
+    * ``True``/``False`` → 1.0f/0.0f
+    """
+    import re as _re
+    code = code.strip()
+    # Bail out on anything that isn't a plain expression
+    _BLOCKERS = ("return ", "def ", "class ", "import ", "for ", "while ",
+                 "if ", "else", "elif ", "#", "\n")
+    if any(kw in code for kw in _BLOCKERS):
+        return None
+
+    expr = code
+
+    # u[i]  →  corresponding upstream signal variable
+    for i, uexpr in enumerate(u_exprs):
+        expr = _re.sub(rf'\bu\[{i}\]', uexpr, expr)
+
+    # math.*  →  C float intrinsics
+    _MATH_MAP = [
+        (r'\bmath\.sin\b',    'sinf'),
+        (r'\bmath\.cos\b',    'cosf'),
+        (r'\bmath\.tan\b',    'tanf'),
+        (r'\bmath\.asin\b',   'asinf'),
+        (r'\bmath\.acos\b',   'acosf'),
+        (r'\bmath\.atan2?\b', 'atanf'),
+        (r'\bmath\.sqrt\b',   'sqrtf'),
+        (r'\bmath\.fabs\b',   'fabsf'),
+        (r'\bmath\.exp\b',    'expf'),
+        (r'\bmath\.log10\b',  'log10f'),
+        (r'\bmath\.log\b',    'logf'),
+        (r'\bmath\.floor\b',  'floorf'),
+        (r'\bmath\.ceil\b',   'ceilf'),
+        (r'\bmath\.fmod\b',   'fmodf'),
+        (r'\bmath\.pow\b',    'powf'),
+        (r'\bmath\.pi\b',     '3.14159265f'),
+        (r'\bmath\.e\b',      '2.71828182f'),
+        (r'\babs\b',          'fabsf'),
+    ]
+    for pat, repl in _MATH_MAP:
+        expr = _re.sub(pat, repl, expr)
+
+    # a**b  →  powf(a, b)  (handles simple token**token)
+    def _pow_sub(m: "_re.Match") -> str:
+        return f"powf({m.group(1)}, {m.group(2)})"
+
+    # Two-pass to catch chained exponents (right-associative)
+    for _ in range(3):
+        expr = _re.sub(
+            r'([\w\.]+(?:\([^)]*\))?)\s*\*\*\s*([\w\.]+(?:\([^)]*\))?)',
+            _pow_sub, expr
+        )
+
+    expr = expr.replace("True", "1.0f").replace("False", "0.0f")
+    return expr
+
+
+def _group_blocks_by_rate(blocks: List[dict], step_ms: int) -> Dict[int, List[dict]]:
+    """Group blocks by their sample_time_ms, using step_ms for blocks with 0."""
+    from collections import defaultdict
+    groups: Dict[int, List[dict]] = defaultdict(list)
+    for b in blocks:
+        st = int(b.get("sample_time_ms", 0))
+        groups[step_ms if st == 0 else st].append(b)
+    return dict(sorted(groups.items()))  # ascending: fastest first
+
+
 def _ss_order(b: dict) -> int:
     """Return the number of states for a StateSpace or DiscreteStateSpace block."""
     A_key = "A" if b["type"] == "StateSpace" else "Ad"
@@ -261,47 +338,48 @@ def _sig_var(bid: str, port: str) -> str:
     return f"sig_{bid}_{port}".replace("-", "_")
 
 
-def _emit_decls(blocks: List[dict]) -> str:
+def _emit_decls(blocks: List[dict], volatile: bool = False) -> str:
     decls = []
+    q = "volatile " if volatile else ""
     for b in blocks:
         if b["type"] == "SquareWave":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float phase_{b['id']} = 0.0f;")
         elif b["type"] == "Constant":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "GpioIn":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "Ultrasonic":
-            decls.append(f"static float {_sig_var(b['id'],'d')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'d')} = 0.0f;")
         elif b["type"] in ("Sum", "Product"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] in ("Step", "Integrator", "TransferFcn", "PID"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         # Group A sources
         elif b["type"] in ("SineWave", "Ramp", "Clock", "PulseGenerator", "ADC", "TimerTick"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         # Group B Math
         elif b["type"] in ("Gain", "Abs", "Sign", "Sqrt", "Saturation", "DeadZone", "MinMax"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         # Group C Logic
         elif b["type"] in ("RelationalOperator", "LogicalOperator", "Switch"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         # Group D Discrete — output + state
         elif b["type"] == "UnitDelay":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _state_{b['id']} = 0.0f;")
         elif b["type"] == "DiscreteIntegrator":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _state_{b['id']} = 0.0f;")
         elif b["type"] == "ZeroOrderHold":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _state_{b['id']} = 0.0f;")
         elif b["type"] == "Derivative":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _state_{b['id']} = 0.0f;")
         # Group E Lookup
         elif b["type"] == "Lookup1D":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] in ("StateSpace", "DiscreteStateSpace"):
             ns = _ss_order(b)  # helper — see below
             ic_str = b["params"].get("initial_state", "").strip()
@@ -309,20 +387,20 @@ def _emit_decls(blocks: List[dict]) -> str:
             # Pad or truncate to ns
             ic_vals = (ic_vals + [0.0]*ns)[:ns]
             ic_init = ", ".join(f"{v:.10f}f" for v in ic_vals)
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _ss_x_{b['id']}[{ns}] = {{{ic_init}}};")
         elif b["type"] == "ZeroPoleGain":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         # New blocks
         elif b["type"] == "Ground":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
         elif b["type"] == "Relay":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static uint8_t _relay_state_{b['id']} = 0;")
         elif b["type"] in ("CompareToConstant", "DetectRisePositive",
                            "SaturationDynamic", "MultiportSwitch", "TransportDelay",
                            "I2CRead"):
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             if b["type"] == "DetectRisePositive":
                 ic = float(b["params"].get("initial_condition", "0.0"))
                 decls.append(f"static float _drp_prev_{b['id']} = {ic:.10f}f;")
@@ -336,34 +414,59 @@ def _emit_decls(blocks: List[dict]) -> str:
         elif b["type"] == "FIRFilter":
             c_str  = b["params"].get("coefficients", "0.25 0.25 0.25 0.25")
             nt     = max(1, len(c_str.split()))
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _fir_buf_{b['id']}[{nt}] = {{0}};")
             decls.append(f"static uint32_t _fir_idx_{b['id']} = 0;")
         elif b["type"] == "BiquadFilter":
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _bq_w1_{b['id']} = 0.0f;")
             decls.append(f"static float _bq_w2_{b['id']} = 0.0f;")
         elif b["type"] == "RunningRMS":
             w = max(1, int(float(b["params"].get("window", "100"))))
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _rms_buf_{b['id']}[{w}] = {{0}};")
             decls.append(f"static uint32_t _rms_idx_{b['id']} = 0;")
             decls.append(f"static float _rms_sum_{b['id']} = 0.0f;")
         elif b["type"] == "MedianFilter":
             w = max(1, min(15, int(float(b["params"].get("window", "5")))))
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _med_buf_{b['id']}[{w}] = {{0}};")
             decls.append(f"static uint32_t _med_cnt_{b['id']} = 0;")
             decls.append(f"static uint32_t _med_idx_{b['id']} = 0;")
         elif b["type"] == "NCO":
             phi0 = float(b["params"].get("initial_phase", "0.0")) * 3.14159265 / 180.0
-            decls.append(f"static float {_sig_var(b['id'],'sin_out')} = 0.0f;")
-            decls.append(f"static float {_sig_var(b['id'],'cos_out')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'sin_out')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'cos_out')} = 0.0f;")
             decls.append(f"static float _nco_phase_{b['id']} = {phi0:.10f}f;")
         elif b["type"] == "PeakDetector":
             ic = float(b["params"].get("initial", "0.0"))
-            decls.append(f"static float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
             decls.append(f"static float _peak_hold_{b['id']} = {ic:.10f}f;")
+        elif b["type"] == "PythonFcn":
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
+        # ---- New control-systems blocks ------------------------------------
+        elif b["type"] == "WeightedSum":
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
+        elif b["type"] == "PlantODE":
+            try:
+                nout = max(1, min(4, int(float(b["params"].get("num_outputs", "2")))))
+            except Exception:
+                nout = 2
+            for _i in range(nout):
+                decls.append(f"static {q}float {_sig_var(b['id'], f'y{_i}')} = 0.0f;")
+        elif b["type"] == "AngleUnwrap":
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _aw_prev_{b['id']} = 0.0f;")
+            decls.append(f"static float _aw_off_{b['id']}  = 0.0f;")
+        elif b["type"] == "HBridgeOut":
+            decls.append(f"static {q}float {_sig_var(b['id'],'pin')} = 0.0f;")
+        elif b["type"] == "DiscreteIntegratorAW":
+            try:
+                ic = float(b["params"].get("initial_condition", "0.0"))
+            except Exception:
+                ic = 0.0
+            decls.append(f"static {q}float {_sig_var(b['id'],'y')} = 0.0f;")
+            decls.append(f"static float _state_{b['id']} = {ic:.10f}f;")
         # GpioOut, Scope, ToWorkspace, DAC, PWMOut, UARTSend, I2CWrite: no signal output
     return "\n".join(decls)
 
@@ -418,7 +521,7 @@ def _emit_helpers(blocks: List[dict]) -> str:
 
 def _emit_init(blocks: List[dict], board: BoardSpec) -> str:
     """GPIO init code based on the blocks present."""
-    lines = ["    GPIO_InitTypeDef gi = {0};"]
+    lines = []
     used_ports = set()
     for b in blocks:
         if b["type"] in ("GpioIn", "GpioOut"):
@@ -485,6 +588,9 @@ def _emit_init(blocks: List[dict], board: BoardSpec) -> str:
     # Enable DWT cycle counter once if any ultrasonic block is present.
     if any(b["type"] == "Ultrasonic" for b in blocks):
         lines.append("    ultrasonic_init();")
+    # Prepend the struct declaration only when it will actually be used.
+    if any("gi.Pin" in l for l in lines):
+        lines.insert(0, "    GPIO_InitTypeDef gi = {0};")
     return "\n".join(lines)
 
 
@@ -1428,6 +1534,142 @@ def _emit_step(blocks: List[dict], wires, workspace, step_ms: int,
             lines.append(f"        {_sig_var(bid,'y')} = _peak_hold_{bid};")
             lines.append(f"    }}")
 
+        # ── PythonFcn ──────────────────────────────────────────────────────
+        elif t == "PythonFcn":
+            ni_   = max(1, min(4, int(float(p.get("num_inputs", "1")))))
+            code_ = p.get("code", "u[0]").strip()
+            u_exprs = [get_input(bid, f"u{i}") for i in range(ni_)]
+            c_expr  = _python_to_c(code_, u_exprs)
+            lines.append(f"    /* block {bid}: PythonFcn */")
+            if c_expr is not None:
+                lines.append(f"    {_sig_var(bid,'y')} = (float)({c_expr});")
+            else:
+                # Multi-line or complex code — emit stub with Python as comment
+                lines.append(f"    /* Python code (manual C translation required):")
+                for ln in code_.splitlines():
+                    lines.append(f"     *   {ln}")
+                lines.append(f"     */")
+                lines.append(f"    {_sig_var(bid,'y')} = 0.0f;  "
+                              f"/* TODO: replace this stub with hand-written C */")
+
+        # ---- WeightedSum ----------------------------------------------------
+        elif t == "WeightedSum":
+            try:
+                ni_  = max(1, min(8, int(float(p.get("num_inputs", "4")))))
+                gvs  = [float(g) for g in p.get("gains", "1 1 1 1").split()]
+                if len(gvs) < ni_:
+                    gvs += [1.0] * (ni_ - len(gvs))
+                gvs = gvs[:ni_]
+            except Exception:
+                ni_ = 1; gvs = [1.0]
+            lines.append(f"    /* block {bid}: WeightedSum y = sum(k[i]*u[i]) */")
+            terms = " + ".join(
+                f"{gvs[i]:.6f}f * {get_input(bid, f'u{i}')}" for i in range(ni_)
+            )
+            lines.append(f"    {_sig_var(bid,'y')} = {terms if terms else '0.0f'};")
+
+        # ---- PlantODE -------------------------------------------------------
+        elif t == "PlantODE":
+            try:
+                nout = max(1, min(4, int(float(p.get("num_outputs", "2")))))
+            except Exception:
+                nout = 2
+            eqs_raw = p.get("equations", "x[1]\n-9.81*math.sin(x[0])-0.1*x[1]+u")
+            lines.append(f"    /* block {bid}: PlantODE — Python simulation only */")
+            lines.append(f"    /* Equations:")
+            for eq_line in eqs_raw.splitlines():
+                lines.append(f"     *   {eq_line.strip()}")
+            lines.append(f"     */")
+            lines.append(f"    /* TODO: implement plant ODE in C or connect to hardware */")
+            for _i in range(nout):
+                lines.append(f"    {_sig_var(bid, f'y{_i}')} = 0.0f;  /* stub */")
+
+        # ---- AngleUnwrap ----------------------------------------------------
+        elif t == "AngleUnwrap":
+            u_expr = get_input(bid, "u")
+            rng_   = p.get("range", "auto").strip()
+            if rng_ == "360":
+                full_v = "360.0f"
+                half_v = "180.0f"
+            else:
+                full_v = "6.28318530718f"
+                half_v = "3.14159265359f"
+            lines.append(f"    /* block {bid}: AngleUnwrap range={rng_} */")
+            lines.append( "    {")
+            lines.append(f"        float _aw_u = {u_expr};")
+            lines.append(f"        float _aw_d = _aw_u - _aw_prev_{bid};")
+            lines.append(f"        if (_aw_d >  {half_v}) _aw_off_{bid} -= {full_v};")
+            lines.append(f"        if (_aw_d < -{half_v}) _aw_off_{bid} += {full_v};")
+            lines.append(f"        _aw_prev_{bid} = _aw_u;")
+            lines.append(f"        {_sig_var(bid,'y')} = _aw_u + _aw_off_{bid};")
+            lines.append( "    }")
+
+        # ---- HBridgeOut -----------------------------------------------------
+        elif t == "HBridgeOut":
+            u_expr   = get_input(bid, "u")
+            timer_   = p.get("timer",   "TIM2").strip().upper()
+            ch_      = p.get("channel", "1").strip()
+            dir_pin_ = p.get("dir_pin", "PB0").strip().upper()
+            try:
+                md_  = max(1e-9, float(p.get("max_duty",      "100.0")))
+                db_  = max(0.0,  float(p.get("dead_band_pct",  "5.0"))) / 100.0 * md_
+            except Exception:
+                md_ = 100.0; db_ = 5.0
+            # Parse pin to port + number
+            if len(dir_pin_) >= 3 and dir_pin_[0] == "P":
+                gpio_port  = f"GPIO{dir_pin_[1]}"
+                gpio_pin   = f"GPIO_PIN_{dir_pin_[2:]}"
+            else:
+                gpio_port, gpio_pin = "GPIOB", "GPIO_PIN_0"
+            ccr_reg  = f"{timer_}->CCR{ch_}"
+            lines.append(f"    /* block {bid}: HBridgeOut timer={timer_} ch={ch_} dir={dir_pin_} */")
+            lines.append( "    {")
+            lines.append(f"        float _hb_u = {u_expr};")
+            lines.append(f"        float _hb_abs = fabsf(_hb_u);")
+            lines.append(f"        uint32_t _hb_duty = 0;")
+            lines.append(f"        if (_hb_abs > {db_:.6f}f) {{")
+            lines.append(f"            HAL_GPIO_WritePin({gpio_port}, {gpio_pin},")
+            lines.append(f"                (_hb_u >= 0.0f) ? GPIO_PIN_SET : GPIO_PIN_RESET);")
+            lines.append(f"            _hb_duty = (uint32_t)((_hb_abs / {md_:.6f}f)")
+            lines.append(f"                        * ({timer_}->ARR + 1));")
+            lines.append(f"        }} else {{")
+            lines.append(f"            HAL_GPIO_WritePin({gpio_port}, {gpio_pin}, GPIO_PIN_RESET);")
+            lines.append(f"        }}")
+            lines.append(f"        {ccr_reg} = _hb_duty;")
+            lines.append(f"        {_sig_var(bid,'pin')} = (float)_hb_u;")
+            lines.append( "    }")
+
+        # ---- DiscreteIntegratorAW -------------------------------------------
+        elif t == "DiscreteIntegratorAW":
+            try:
+                K_raw     = float(workspace.eval_param(p.get("gain_value",      "1.0")))
+                upper_raw = float(workspace.eval_param(p.get("upper_limit",  "1e10")))
+                lower_raw = float(workspace.eval_param(p.get("lower_limit", "-1e10")))
+                kaw_raw   = float(workspace.eval_param(p.get("back_calc_coeff", "0.0")))
+            except Exception:
+                K_raw = 1.0; upper_raw = 1e10; lower_raw = -1e10; kaw_raw = 0.0
+            K_     = f"{K_raw:.6f}f"
+            upper_ = f"{upper_raw:.6f}f"
+            lower_ = f"{lower_raw:.6f}f"
+            u_expr = get_input(bid, "u")
+            lines.append(f"    /* block {bid}: DiscreteIntegratorAW Kaw={kaw_raw:.6f} */")
+            lines.append( "    {")
+            lines.append(f"        float _out_{bid} = _state_{bid};")
+            lines.append(f"        if (_out_{bid} > {upper_}) _out_{bid} = {upper_};")
+            lines.append(f"        if (_out_{bid} < {lower_}) _out_{bid} = {lower_};")
+            lines.append(f"        {_sig_var(bid,'y')} = _out_{bid};")
+            if kaw_raw != 0.0:
+                kaw_  = f"{kaw_raw:.6f}f"
+                lines.append(f"        float _bc_{bid} = {kaw_}"
+                              f" * (_out_{bid} - _state_{bid});")
+                lines.append(f"        _state_{bid} += {K_} * {u_expr}"
+                              f" * {dt_s:.6f}f + _bc_{bid} * {dt_s:.6f}f;")
+            else:
+                lines.append(f"        _state_{bid} += {K_} * {u_expr} * {dt_s:.6f}f;")
+            lines.append(f"        if (_state_{bid} > {upper_}) _state_{bid} = {upper_};")
+            lines.append(f"        if (_state_{bid} < {lower_}) _state_{bid} = {lower_};")
+            lines.append( "    }")
+
     return "\n".join(lines), streamed
 
 
@@ -1740,6 +1982,11 @@ FREERTOS_CONFIG_H = r"""/* Auto-generated FreeRTOSConfig.h for STM32 Block IDE.
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
+/* SystemCoreClock is declared in system_stm32f4xx.h (pulled in via stm32f4xx.h).
+ * port.c needs it for the SysTick calculation; include it here so the macro
+ * resolves when FreeRTOSConfig.h is included before any HAL header.        */
+#include "stm32f4xx.h"
+
 /* Scheduler ---------------------------------------------------------------- */
 #define configUSE_PREEMPTION                     1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  1
@@ -1767,7 +2014,7 @@ FREERTOS_CONFIG_H = r"""/* Auto-generated FreeRTOSConfig.h for STM32 Block IDE.
 #define configMESSAGE_BUFFER_LENGTH_TYPE         size_t
 
 /* Memory ------------------------------------------------------------------- */
-#define configSUPPORT_STATIC_ALLOCATION          1
+#define configSUPPORT_STATIC_ALLOCATION          0
 #define configSUPPORT_DYNAMIC_ALLOCATION         1
 #define configTOTAL_HEAP_SIZE                    (16 * 1024)
 #define configAPPLICATION_ALLOCATED_HEAP         0
@@ -2070,7 +2317,7 @@ extern "C" {
 /* ######################## System Configuration ############################ */
 #define  VDD_VALUE                    3300U
 #define  TICK_INT_PRIORITY            0x0FU
-#define  USE_RTOS                     {use_rtos_val}U
+#define  USE_RTOS                     0U
 #define  PREFETCH_ENABLE              1U
 #define  INSTRUCTION_CACHE_ENABLE     1U
 #define  DATA_CACHE_ENABLE            1U
@@ -2126,6 +2373,248 @@ extern "C" {
 
 
 # ---------------------------------------------------------------------------
+# Multi-rate FreeRTOS codegen helpers
+# ---------------------------------------------------------------------------
+
+_TASK_FUNC_TEMPLATE = """\
+static void {func_name}(void *pvParameters) {{
+    (void)pvParameters;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xPeriod = pdMS_TO_TICKS({period_ms});
+    for (;;) {{
+        {step_func}();
+{scope_call}        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+    }}
+}}
+
+static void {step_func}(void) {{
+{step_body}
+}}"""
+
+
+def _emit_multirate_rtos_main(
+    rate_groups: Dict[int, List[dict]],
+    wires,
+    workspace,
+    step_ms: int,
+    board,
+    all_blocks: List[dict],
+) -> str:
+    """Build main.c for a multi-rate FreeRTOS project.
+
+    One task is emitted per rate group; the fastest (lowest ms) task also
+    calls scope_emit().  Priorities descend: fastest = configMAX_PRIORITIES-2
+    (5 for configMAX_PRIORITIES=7), next = 4, etc.
+    """
+    rates = sorted(rate_groups.keys())
+    base_priority = 5  # configMAX_PRIORITIES=7; FreeRTOS timer task gets 6
+
+    fwd_decls: List[str] = []
+    task_creates: List[str] = []
+    task_funcs: List[str] = []
+    scope_streamed: List[str] = []
+
+    for idx, rate_ms in enumerate(rates):
+        group     = rate_groups[rate_ms]
+        func_name = f"model_task_{rate_ms}ms"
+        step_func = f"model_step_{rate_ms}ms"
+        priority  = base_priority - idx
+
+        step_body, streamed = _emit_step(group, wires, workspace, rate_ms, board)
+
+        is_fastest = (idx == 0)
+        if is_fastest:
+            scope_streamed = streamed
+            scope_call = "        scope_emit();\n"
+        else:
+            scope_call = ""
+
+        fwd_decls.append(f"static void {step_func}(void);")
+        fwd_decls.append(f"static void {func_name}(void *pvParameters);")
+
+        task_creates.append(
+            f'    xTaskCreate({func_name}, "Task{rate_ms}ms", 512, NULL, {priority}, NULL);'
+        )
+
+        task_funcs.append(
+            _TASK_FUNC_TEMPLATE.format(
+                func_name=func_name,
+                period_ms=rate_ms,
+                step_func=step_func,
+                scope_call=scope_call,
+                step_body=step_body,
+            )
+        )
+
+    rates_str = ", ".join(f"{r} ms" for r in rates)
+    helpers   = _emit_helpers(all_blocks)
+    decls     = _emit_decls(all_blocks, volatile=True)
+    gpio_init = _emit_init(all_blocks, board)
+
+    if scope_streamed:
+        fmt = ",".join(["%.4f"] * len(scope_streamed)) + "\\r\\n"
+        args = ", ".join(scope_streamed)
+        scope_body = (
+            "    char buf[96];\n"
+            f"    int n = snprintf(buf, sizeof(buf), \"{fmt}\", {args});\n"
+            "    if (n > 0) HAL_UART_Transmit(&huart2, (uint8_t*)buf, n, 10);\n"
+        )
+    else:
+        scope_body = "    /* no scope channels connected */\n"
+
+    fwd_block   = "\n".join(fwd_decls)
+    creates_blk = "\n".join(task_creates)
+    funcs_blk   = "\n\n/* ------------------------------------------------------------------- */\n".join(
+        task_funcs
+    )
+
+    return MAIN_C_MULTIRATE_RTOS_TEMPLATE.format(
+        rates_str=rates_str,
+        n_blocks=sum(len(g) for g in rate_groups.values()),
+        board_name=board.name if hasattr(board, "name") else str(board),
+        decls=decls,
+        helpers=helpers,
+        fwd_decls=fwd_block,
+        task_creates=creates_blk,
+        task_funcs=funcs_blk,
+        scope_body=scope_body,
+        gpio_init=gpio_init,
+    )
+
+
+MAIN_C_MULTIRATE_RTOS_TEMPLATE = r"""/*
+ * Auto-generated by STM32 Block IDE  [FreeRTOS multi-rate].
+ * DO NOT EDIT BY HAND — your changes will be overwritten on the next build.
+ *
+ * Rates:    {rates_str}
+ * Blocks:   {n_blocks}
+ * RTOS:     FreeRTOS (pure kernel API)
+ *
+ * Scheduling strategy
+ * -------------------
+ * One FreeRTOS task per rate group; faster tasks run at higher priority.
+ * Signal variables shared between tasks are declared volatile.
+ */
+
+#include "stm32f4xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include <stdio.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------- */
+/* Block signals (volatile = shared across tasks)                      */
+/* ------------------------------------------------------------------- */
+{decls}
+
+/* ------------------------------------------------------------------- */
+/* Helper functions (emitted only for blocks that need them)           */
+/* ------------------------------------------------------------------- */
+{helpers}
+
+/* ------------------------------------------------------------------- */
+/* Forward declarations                                                */
+/* ------------------------------------------------------------------- */
+static void SystemClock_Config(void);
+static void Error_Handler(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+static void scope_emit(void);
+{fwd_decls}
+
+UART_HandleTypeDef huart2;
+
+/* ------------------------------------------------------------------- */
+/* main                                                                */
+/* ------------------------------------------------------------------- */
+int main(void) {{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_USART2_UART_Init();
+
+{task_creates}
+    vTaskStartScheduler();
+
+    /* vTaskStartScheduler() should never return */
+    while (1) {{}}
+}}
+
+/* ------------------------------------------------------------------- */
+/* Per-rate task functions and step functions                          */
+/* ------------------------------------------------------------------- */
+{task_funcs}
+
+/* ------------------------------------------------------------------- */
+/* Stream scope channels over USART2 as comma-separated floats.        */
+/* ------------------------------------------------------------------- */
+static void scope_emit(void) {{
+{scope_body}
+}}
+
+/* ------------------------------------------------------------------- */
+/* Board init                                                          */
+/* ------------------------------------------------------------------- */
+static void MX_GPIO_Init(void) {{
+{gpio_init}
+}}
+
+static void MX_USART2_UART_Init(void) {{
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef gi = {{0}};
+    gi.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+    gi.Mode = GPIO_MODE_AF_PP;
+    gi.Pull = GPIO_NOPULL;
+    gi.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gi.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &gi);
+
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}}
+
+static void SystemClock_Config(void) {{
+    RCC_OscInitTypeDef osc = {{0}};
+    RCC_ClkInitTypeDef clk = {{0}};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState = RCC_PLL_ON;
+    osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM = 16; osc.PLL.PLLN = 360;
+    osc.PLL.PLLP = RCC_PLLP_DIV2; osc.PLL.PLLQ = 7;
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) Error_Handler();
+    if (HAL_PWREx_EnableOverDrive() != HAL_OK) Error_Handler();
+
+    clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                  | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV4;
+    clk.APB2CLKDivider = RCC_HCLK_DIV2;
+    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_5) != HAL_OK) Error_Handler();
+}}
+
+static void Error_Handler(void) {{
+    while (1) {{ /* spin */ }}
+}}
+"""
+
+
+# ---------------------------------------------------------------------------
 # Project generation
 # ---------------------------------------------------------------------------
 
@@ -2150,41 +2639,49 @@ def generate_project(out_dir: Path, model: dict, workspace) -> Path:
     proj = out_dir / "current_project"
     proj.mkdir(exist_ok=True)
 
-    blocks    = _topo_order(model)
-    wires     = _wires(model)
-    decls     = _emit_decls(blocks)
-    helpers   = _emit_helpers(blocks)
-    gpio_init = _emit_init(blocks, board)
-    step_body, streamed = _emit_step(blocks, wires, workspace, step_ms, board)
-
-    if streamed:
-        fmt = ",".join(["%.4f"] * len(streamed)) + "\\r\\n"
-        args = ", ".join(streamed)
-        scope_body = (
-            "    char buf[96];\n"
-            f"    int n = snprintf(buf, sizeof(buf), \"{fmt}\", {args});\n"
-            "    if (n > 0) HAL_UART_Transmit(&huart2, (uint8_t*)buf, n, 10);\n"
-        )
-    else:
-        scope_body = "    /* no scope channels connected */\n"
+    blocks      = _topo_order(model)
+    wires       = _wires(model)
+    rate_groups = _group_blocks_by_rate(blocks, step_ms)
+    is_multirate = use_rtos and len(rate_groups) > 1
 
     # -----------------------------------------------------------------
     # main.c
     # -----------------------------------------------------------------
-    template_vars = dict(
-        board_name=board_name,
-        step_ms=step_ms,
-        n_blocks=len(blocks),
-        decls=decls,
-        helpers=helpers,
-        step_body=step_body,
-        scope_body=scope_body,
-        gpio_init=gpio_init,
-    )
-    if use_rtos:
-        main_c = MAIN_C_RTOS_TEMPLATE.format(**template_vars)
+    if is_multirate:
+        main_c = _emit_multirate_rtos_main(
+            rate_groups, wires, workspace, step_ms, board, blocks
+        )
     else:
-        main_c = MAIN_C_TEMPLATE.format(**template_vars)
+        decls     = _emit_decls(blocks)
+        helpers   = _emit_helpers(blocks)
+        gpio_init = _emit_init(blocks, board)
+        step_body, streamed = _emit_step(blocks, wires, workspace, step_ms, board)
+
+        if streamed:
+            fmt = ",".join(["%.4f"] * len(streamed)) + "\\r\\n"
+            args = ", ".join(streamed)
+            scope_body = (
+                "    char buf[96];\n"
+                f"    int n = snprintf(buf, sizeof(buf), \"{fmt}\", {args});\n"
+                "    if (n > 0) HAL_UART_Transmit(&huart2, (uint8_t*)buf, n, 10);\n"
+            )
+        else:
+            scope_body = "    /* no scope channels connected */\n"
+
+        template_vars = dict(
+            board_name=board_name,
+            step_ms=step_ms,
+            n_blocks=len(blocks),
+            decls=decls,
+            helpers=helpers,
+            step_body=step_body,
+            scope_body=scope_body,
+            gpio_init=gpio_init,
+        )
+        if use_rtos:
+            main_c = MAIN_C_RTOS_TEMPLATE.format(**template_vars)
+        else:
+            main_c = MAIN_C_TEMPLATE.format(**template_vars)
     (proj / "main.c").write_text(main_c)
 
     # -----------------------------------------------------------------
@@ -2203,10 +2700,10 @@ def generate_project(out_dir: Path, model: dict, workspace) -> Path:
             MAKEFILE_TEMPLATE.format(cflags=board.cflags))
 
     # -----------------------------------------------------------------
-    # HAL config — USE_RTOS must match the chosen scheduler
+    # HAL config — USE_RTOS must always be 0 (STM32 HAL V1.x refuses
+    # to compile when it is 1, regardless of RTOS usage)
     # -----------------------------------------------------------------
-    (proj / "stm32f4xx_hal_conf.h").write_text(
-        HAL_CONF_H.replace("{use_rtos_val}", "1" if use_rtos else "0"))
+    (proj / "stm32f4xx_hal_conf.h").write_text(HAL_CONF_H)
 
     # -----------------------------------------------------------------
     # FreeRTOS config (only needed for RTOS builds)
