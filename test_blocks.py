@@ -7610,6 +7610,56 @@ def test_pythonfcn_infinite_loop_not_triggered():
     assert isinstance(errors, list)
 
 
+# ---------------------------------------------------------------------------
+# Regression: _python_to_c must strip leading "y = " so the generated C line
+# does not contain an undeclared variable assignment inside a cast expression.
+# Bug: "y = u[0] + u[1]" was emitted as  sig_X_y = (float)(y = ...);
+#      which fails to compile ("y undeclared").
+# ---------------------------------------------------------------------------
+
+def test_pythonfcn_y_assign_stripped_from_codegen():
+    """'y = u[0] + u[1]' must NOT produce '(y = ...)' in the C output."""
+    from code_templates import _python_to_c
+    result = _python_to_c("y = u[0] + u[1]", ["sig_C0_y", "sig_C1_y"])
+    # Must return a valid expression (not None → stub, and not containing 'y =')
+    assert result is not None, "_python_to_c returned None for simple y= assignment"
+    assert "y =" not in result and "y=" not in result, (
+        f"_python_to_c left 'y =' in expression: {result!r}"
+    )
+    assert "sig_C0_y" in result and "sig_C1_y" in result
+
+
+def test_pythonfcn_y_assign_end_to_end_codegen():
+    """Full codegen with a PythonFcn using 'y = u[0]' must compile-clean C."""
+    import json, textwrap
+    # Minimal two-block model: Constant → PythonFcn
+    model = {
+        "step_ms": 10,
+        "blocks": [
+            {"id": "C1", "type": "Constant",  "x": 0,   "y": 0,
+             "params": {"value": "3.0"}},
+            {"id": "PF", "type": "PythonFcn", "x": 200, "y": 0,
+             "params": {"num_inputs": "1", "code": "y = u[0] * 2.0"}},
+            {"id": "SC", "type": "Scope",     "x": 400, "y": 0,
+             "params": {}},
+        ],
+        "connections": [
+            {"src_block": "C1", "src_port": "y",  "dst_block": "PF", "dst_port": "u0"},
+            {"src_block": "PF", "src_port": "y",  "dst_block": "SC", "dst_port": "u0"},
+        ],
+    }
+    board = BOARDS["NUCLEO-F446RE"]
+    wires = _wires(model)
+    src, _ = _emit_step(model["blocks"], wires, FakeWorkspace(), step_ms=10, board=board)
+    # The critical check: no raw 'y =' inside a cast
+    assert "(y =" not in src and "(y=" not in src, (
+        "Generated C step code contains illegal '(y =...)':\n" +
+        "\n".join(ln for ln in src.splitlines() if "y =" in ln)
+    )
+    # And the PythonFcn output should contain the multiplied signal
+    assert "sig_PF_y" in src
+
+
 # ===========================================================================
 # Section F — Sweep update (future new blocks will auto-appear in catalog sweep)
 # ===========================================================================

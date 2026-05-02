@@ -189,6 +189,12 @@ def _python_to_c(code: str, u_exprs: List[str]) -> "Optional[str]":
     """
     import re as _re
     code = code.strip()
+    # Strip a leading "y = <expr>" wrapper — the caller already assigns the
+    # result to the signal variable, so the bare RHS expression is what we want.
+    # The negative lookahead (?!=) ensures "y == x" (comparison) is NOT stripped.
+    _y_assign = _re.match(r'^y\s*=\s*(?!=)(.+)$', code, _re.DOTALL)
+    if _y_assign:
+        code = _y_assign.group(1).strip()
     # Bail out on anything that isn't a plain expression
     _BLOCKERS = ("return ", "def ", "class ", "import ", "for ", "while ",
                  "if ", "else", "elif ", "#", "\n")
