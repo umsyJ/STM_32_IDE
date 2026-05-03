@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import subprocess
 import threading
@@ -43,7 +44,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
     QSplitter, QStatusBar, QTabWidget, QTextEdit, QToolBar, QVBoxLayout,
-    QWidget, QCheckBox, QMenu,
+    QWidget, QCheckBox, QMenu, QTreeWidget, QTreeWidgetItem,
 )
 
 import numpy as np
@@ -315,7 +316,1165 @@ BLOCK_CATALOG: Dict[str, BlockSpec] = {
             "sink, analogous to Simulink's To Workspace block."
         ),
     ),
+
+    # ---- Group A: Sources --------------------------------------------------
+
+    "SineWave": BlockSpec(
+        type_name="SineWave",
+        display_name="Sine Wave",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "frequency_hz": ("1.0",  "Frequency in Hz"),
+            "amplitude":    ("1.0",  "Peak amplitude"),
+            "phase_deg":    ("0.0",  "Phase offset in degrees"),
+            "offset":       ("0.0",  "DC offset added to output"),
+        },
+        description=(
+            "Generates A*sin(2*pi*f*t + phi) + offset. "
+            "Phase is specified in degrees. "
+            "Frequency must be > 0 Hz."
+        ),
+    ),
+
+    "Ramp": BlockSpec(
+        type_name="Ramp",
+        display_name="Ramp",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "slope":          ("1.0", "Rate of change (units/second)"),
+            "start_time":     ("0.0", "Time at which ramp begins (s)"),
+            "initial_output": ("0.0", "Output before and at start_time"),
+        },
+        description=(
+            "Outputs initial_output while t < start_time, then "
+            "initial_output + slope*(t - start_time) after. "
+            "Equivalent to Simulink's Ramp source block."
+        ),
+    ),
+
+    "Clock": BlockSpec(
+        type_name="Clock",
+        display_name="Clock",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description=(
+            "Outputs the current simulation time t in seconds. "
+            "On the MCU, time is tracked by counting model steps multiplied "
+            "by the step period."
+        ),
+    ),
+
+    "PulseGenerator": BlockSpec(
+        type_name="PulseGenerator",
+        display_name="Pulse Generator",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "amplitude":   ("1.0",  "High-level output value"),
+            "period":      ("1.0",  "Pulse period in seconds (> 0)"),
+            "pulse_width": ("50",   "Pulse width as % of period (0-100)"),
+            "phase_delay": ("0.0",  "Delay before first pulse (s)"),
+        },
+        description=(
+            "Generates a periodic rectangular pulse. "
+            "pulse_width is a percentage of the period (0-100). "
+            "Output is amplitude during the high phase, 0 otherwise."
+        ),
+    ),
+
+    # ---- Group B: Math -----------------------------------------------------
+
+    "Gain": BlockSpec(
+        type_name="Gain",
+        display_name="Gain",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "gain": ("1.0", "Scalar gain factor applied to input"),
+        },
+        description="Multiplies input u by gain: y = gain * u.",
+    ),
+
+    "Abs": BlockSpec(
+        type_name="Abs",
+        display_name="Abs",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Absolute value: y = |u|.",
+    ),
+
+    "Sign": BlockSpec(
+        type_name="Sign",
+        display_name="Sign",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Sign function: y = 1 if u > 0, -1 if u < 0, 0 if u == 0.",
+    ),
+
+    "Sqrt": BlockSpec(
+        type_name="Sqrt",
+        display_name="Sqrt",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mode": ("sqrt", "sqrt: y=sqrt(|u|); signed_sqrt: y=sign(u)*sqrt(|u|)"),
+        },
+        description=(
+            "Square root block. mode='sqrt': y = sqrt(|u|). "
+            "mode='signed_sqrt': y = sign(u)*sqrt(|u|)."
+        ),
+    ),
+
+    "Saturation": BlockSpec(
+        type_name="Saturation",
+        display_name="Saturation",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "upper_limit": ("1.0",  "Maximum output value"),
+            "lower_limit": ("-1.0", "Minimum output value"),
+        },
+        description="Clips input to [lower_limit, upper_limit]: y = clip(u, lower, upper).",
+    ),
+
+    "DeadZone": BlockSpec(
+        type_name="DeadZone",
+        display_name="Dead Zone",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "lower_value": ("-0.5", "Lower dead-zone threshold"),
+            "upper_value": ("0.5",  "Upper dead-zone threshold"),
+        },
+        description=(
+            "Dead zone nonlinearity: y = u - upper if u > upper; "
+            "y = u - lower if u < lower; y = 0 inside the zone."
+        ),
+    ),
+
+    "MinMax": BlockSpec(
+        type_name="MinMax",
+        display_name="MinMax",
+        color="#e67e22",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("min", "min or max"),
+        },
+        description="Outputs min(u0,u1) or max(u0,u1) depending on function parameter.",
+    ),
+
+    # ---- Group C: Logic ----------------------------------------------------
+
+    "RelationalOperator": BlockSpec(
+        type_name="RelationalOperator",
+        display_name="Relational Op",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": (">", "Comparison: >, <, >=, <=, ==, !="),
+        },
+        description=(
+            "Compares u0 and u1 using the selected operator. "
+            "Output y = 1.0 if true, 0.0 if false."
+        ),
+    ),
+
+    "LogicalOperator": BlockSpec(
+        type_name="LogicalOperator",
+        display_name="Logical Op",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": ("AND", "Boolean operation: AND, OR, NOT, NAND, NOR, XOR"),
+        },
+        description=(
+            "Boolean logic gate. NOT uses only u0. "
+            "Inputs treated as boolean (nonzero = true). "
+            "Output y = 1.0 or 0.0."
+        ),
+    ),
+
+    "Switch": BlockSpec(
+        type_name="Switch",
+        display_name="Switch",
+        color="#27ae60",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in"), PortSpec("u2", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "threshold": ("0.5", "Threshold value for control input u1"),
+            "criteria":  (">=",  "Comparison for u1 vs threshold: >, >=, =="),
+        },
+        description=(
+            "Three-input switch: y = u0 if u1 criteria threshold else u2. "
+            "u1 is the control input, u0 and u2 are data inputs."
+        ),
+    ),
+
+    # ---- Group D: Discrete -------------------------------------------------
+
+    "UnitDelay": BlockSpec(
+        type_name="UnitDelay",
+        display_name="Unit Delay",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Output at first sample (k=0)"),
+        },
+        description="One-sample delay: y[k] = u[k-1]. Also known as z^-1.",
+    ),
+
+    "DiscreteIntegrator": BlockSpec(
+        type_name="DiscreteIntegrator",
+        display_name="Discrete Integrator",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "gain_value":        ("1.0",   "Integrator gain K"),
+            "initial_condition": ("0.0",   "Initial state"),
+            "upper_limit":       ("1e10",  "Upper saturation limit"),
+            "lower_limit":       ("-1e10", "Lower saturation limit"),
+            "method":            ("Forward Euler", "Integration method: Forward Euler, Backward Euler, Trapezoidal"),
+        },
+        description=(
+            "Discrete-time integrator: y[k] = clip(y[k-1] + K*u[k]*Ts, lower, upper). "
+            "Supports Forward Euler, Backward Euler, and Trapezoidal methods."
+        ),
+    ),
+
+    "ZeroOrderHold": BlockSpec(
+        type_name="ZeroOrderHold",
+        display_name="Zero-Order Hold",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "sample_time": ("0.01", "Hold sample time in seconds (>= step time)"),
+        },
+        description=(
+            "Samples input every sample_time seconds and holds the value "
+            "between samples. Useful for rate transitions."
+        ),
+    ),
+
+    "Derivative": BlockSpec(
+        type_name="Derivative",
+        display_name="Derivative",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Assumed previous input value at k=0"),
+        },
+        description=(
+            "Numerical derivative: y[k] = (u[k] - u[k-1]) / Ts. "
+            "The initial_condition sets the assumed u[-1]."
+        ),
+    ),
+
+    # ---- Group E: Lookup ---------------------------------------------------
+
+    "Lookup1D": BlockSpec(
+        type_name="Lookup1D",
+        display_name="1-D Lookup",
+        color="#f39c12",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "breakpoints":    ("0 1",  "Space-separated breakpoint values (strictly increasing)"),
+            "table_data":     ("0 1",  "Space-separated output values (same length as breakpoints)"),
+            "extrapolation":  ("clip", "Extrapolation mode: clip or linear"),
+        },
+        description=(
+            "Piecewise-linear 1-D lookup table. "
+            "Interpolates between breakpoints; clips or extrapolates at boundaries."
+        ),
+    ),
+
+    # ---- Group F: STM32 HAL ------------------------------------------------
+
+    "ADC": BlockSpec(
+        type_name="ADC",
+        display_name="ADC",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "channel":    ("1",   "ADC channel number (1-16)"),
+            "resolution": ("12",  "ADC resolution bits: 6, 8, 10, or 12"),
+            "vref":       ("3.3", "Reference voltage in volts (> 0)"),
+            "sim_value":  ("0.0", "Constant voltage used during host simulation"),
+        },
+        description=(
+            "Reads an ADC channel and outputs the voltage in volts. "
+            "In host simulation, outputs the constant sim_value."
+        ),
+    ),
+
+    "DAC": BlockSpec(
+        type_name="DAC",
+        display_name="DAC",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "channel": ("1",   "DAC channel: 1 or 2"),
+            "vref":    ("3.3", "Reference voltage in volts (> 0)"),
+        },
+        description=(
+            "Converts input voltage to DAC output. "
+            "Input u is clamped to [0, vref] before conversion."
+        ),
+    ),
+
+    "PWMOut": BlockSpec(
+        type_name="PWMOut",
+        display_name="PWM Out",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "timer":        ("TIM2",   "HAL timer handle name (e.g. TIM2)"),
+            "channel":      ("1",      "Timer channel number (1-4)"),
+            "frequency_hz": ("1000",   "PWM frequency in Hz (> 0)"),
+            "max_duty":     ("100.0",  "Maximum duty cycle value (> 0)"),
+        },
+        description=(
+            "Sets PWM duty cycle from input u. "
+            "u is clamped to [0, max_duty] before setting the compare register."
+        ),
+    ),
+
+    "TimerTick": BlockSpec(
+        type_name="TimerTick",
+        display_name="Timer Tick",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "scale": ("0.001", "Scale factor: y = HAL_GetTick() * scale"),
+        },
+        description=(
+            "Outputs HAL_GetTick() * scale. "
+            "Default scale=0.001 converts milliseconds to seconds. "
+            "In simulation, y = t * 1000 * scale."
+        ),
+    ),
+
+    "StateSpace": BlockSpec(
+        type_name="StateSpace",
+        display_name="State Space",
+        color="#154360",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "A":             ("0",      "System matrix (n×n). Rows separated by ';', e.g. '0 1; -2 -3'"),
+            "B":             ("1",      "Input matrix (n×1). Rows separated by ';', e.g. '0; 1'"),
+            "C":             ("1",      "Output matrix (1×n). Space-separated, e.g. '1 0'"),
+            "D":             ("0",      "Feedthrough scalar"),
+            "initial_state": ("",       "Initial state vector, space-separated (defaults to zeros)"),
+            "method":        ("euler",  "Discretization method: 'euler' or 'zoh'"),
+        },
+        description=(
+            "Continuous-time state-space model: dx/dt = Ax + Bu, y = Cx + Du. "
+            "Discretized via forward Euler (Ad=I+A·dt, Bd=B·dt) or ZOH (requires scipy). "
+            "A is n×n, B is n×1, C is 1×n, D is scalar. "
+            "Rows separated by ';', columns by spaces."
+        ),
+    ),
+
+    "DiscreteStateSpace": BlockSpec(
+        type_name="DiscreteStateSpace",
+        display_name="Discrete State Space",
+        color="#1a2456",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "Ad":            ("1",  "Discrete system matrix (n×n). Rows separated by ';'"),
+            "Bd":            ("1",  "Discrete input matrix (n×1). Rows separated by ';'"),
+            "Cd":            ("1",  "Output matrix (1×n). Space-separated"),
+            "Dd":            ("0",  "Feedthrough scalar"),
+            "initial_state": ("",   "Initial state vector, space-separated (defaults to zeros)"),
+        },
+        description=(
+            "Discrete-time state-space model: x[k+1] = Ad·x[k] + Bd·u[k], "
+            "y[k] = Cd·x[k] + Dd·u[k]. "
+            "Enter already-discretized matrices — no conversion is applied. "
+            "Rows separated by ';', columns by spaces."
+        ),
+    ),
+
+    "ZeroPoleGain": BlockSpec(
+        type_name="ZeroPoleGain",
+        display_name="Zero-Pole-Gain",
+        color="#4a235a",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "zeros": ("",    "s-domain zeros, space-separated real values (leave empty for none)"),
+            "poles": ("-1",  "s-domain poles, space-separated real values"),
+            "gain":  ("1.0", "System gain K"),
+        },
+        description=(
+            "Continuous-time transfer function in zero-pole-gain form: "
+            "H(s) = K * prod(s-z) / prod(s-p). "
+            "Only real poles/zeros are supported. "
+            "Internally converts to rational TF then discretizes via bilinear (Tustin) transform."
+        ),
+    ),
+
+    # ---- Group G: New Sources -----------------------------------------------
+
+    "Chirp": BlockSpec(
+        type_name="Chirp",
+        display_name="Chirp Signal",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "amplitude":  ("1.0",  "Signal amplitude"),
+            "f_start":    ("1.0",  "Start frequency in Hz (at t=0)"),
+            "f_end":      ("10.0", "End frequency in Hz (at t=sweep_time)"),
+            "sweep_time": ("5.0",  "Duration of the sweep in seconds"),
+            "phase_deg":  ("0.0",  "Initial phase offset in degrees"),
+        },
+        description=(
+            "Linearly swept-frequency sine wave (chirp). "
+            "Frequency ramps from f_start to f_end over sweep_time seconds. "
+            "After sweep_time the frequency stays at f_end. "
+            "Useful for system identification and frequency response testing."
+        ),
+    ),
+
+    "RandomNumber": BlockSpec(
+        type_name="RandomNumber",
+        display_name="Random Number",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mean":     ("0.0", "Mean of the Gaussian distribution"),
+            "variance": ("1.0", "Variance (must be > 0)"),
+            "seed":     ("-1",  "RNG seed (-1 = non-deterministic)"),
+        },
+        description=(
+            "Generates Gaussian (normal) random noise at each time step. "
+            "In simulation uses numpy.random.normal. "
+            "On STM32 hardware, outputs constant 0 (no hardware RNG assumed); "
+            "replace with your platform RNG if available."
+        ),
+    ),
+
+    "FromWorkspace": BlockSpec(
+        type_name="FromWorkspace",
+        display_name="From Workspace",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "variable_name": ("u",   "Workspace variable name (must be a 1-D array)"),
+            "default":       ("0.0", "Value when index is out of range"),
+        },
+        description=(
+            "Reads signal samples from a workspace variable (must be a 1-D NumPy array). "
+            "Index k maps to variable[k]; if k is out of bounds, the default value is used. "
+            "On STM32, outputs the constant default value (arrays cannot live on-device)."
+        ),
+    ),
+
+    # ---- Group G2: Ground (Source) -----------------------------------------
+
+    "Ground": BlockSpec(
+        type_name="Ground",
+        display_name="Ground",
+        color="#1a5276",
+        outputs=[PortSpec("y", "out")],
+        params={},
+        description="Outputs a constant zero. Use to terminate unconnected input ports.",
+    ),
+
+    # ---- Group H: New Math --------------------------------------------------
+
+    "MathFunction": BlockSpec(
+        type_name="MathFunction",
+        display_name="Math Function",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("exp", "Operation: exp | log | log10 | square | reciprocal | pow10 | pow2"),
+            "exponent": ("2.0", "Exponent for 'pow' operations (unused by others)"),
+        },
+        description=(
+            "Applies a mathematical function to the input: "
+            "exp (e^u), log (ln u), log10 (log base 10), "
+            "square (u^2), reciprocal (1/u), pow10 (10^u), pow2 (2^u). "
+            "log/log10/reciprocal protect against non-positive inputs (output 0)."
+        ),
+    ),
+
+    "RoundingFunction": BlockSpec(
+        type_name="RoundingFunction",
+        display_name="Rounding Function",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "function": ("round", "Operation: floor | ceil | round | fix"),
+        },
+        description=(
+            "Applies a rounding operation: "
+            "floor (round toward -inf), ceil (round toward +inf), "
+            "round (round to nearest integer), fix (truncate toward zero)."
+        ),
+    ),
+
+    "Divide": BlockSpec(
+        type_name="Divide",
+        display_name="Divide",
+        color="#e67e22",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "eps": ("1e-10", "Minimum |denominator| before output is forced to 0"),
+        },
+        description=(
+            "y = u0 / u1. "
+            "If |u1| < eps, output is 0 to avoid divide-by-zero. "
+            "Tune eps to match your signal magnitudes."
+        ),
+    ),
+
+    "Bias": BlockSpec(
+        type_name="Bias",
+        display_name="Bias",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "bias": ("0.0", "Constant offset added to input: y = u + bias"),
+        },
+        description="Adds a constant offset to the input: y = u + bias.",
+    ),
+
+    "Polynomial": BlockSpec(
+        type_name="Polynomial",
+        display_name="Polynomial",
+        color="#e67e22",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "coefficients": ("1 0", "Polynomial coefficients, highest power first (like numpy.polyval). "
+                                    "'1 0' = u, '1 2 1' = u^2+2u+1."),
+        },
+        description=(
+            "Evaluates a polynomial in u using Horner's method: "
+            "y = c[0]*u^n + c[1]*u^(n-1) + ... + c[n]. "
+            "Enter coefficients space-separated, highest power first."
+        ),
+    ),
+
+    # ---- Group I: New Nonlinear ---------------------------------------------
+
+    "RateLimiter": BlockSpec(
+        type_name="RateLimiter",
+        display_name="Rate Limiter",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "rising_limit":  ("1.0",  "Maximum rate of increase per second (must be > 0)"),
+            "falling_limit": ("-1.0", "Maximum rate of decrease per second (must be < 0)"),
+            "initial_condition": ("0.0", "Initial output value"),
+        },
+        description=(
+            "Limits the rate of change of the input signal. "
+            "rising_limit (> 0) caps how fast the output can increase per second. "
+            "falling_limit (< 0) caps how fast it can decrease per second."
+        ),
+    ),
+
+    "Quantizer": BlockSpec(
+        type_name="Quantizer",
+        display_name="Quantizer",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "interval": ("0.1", "Quantization interval (must be > 0); y = round(u/interval)*interval"),
+        },
+        description=(
+            "Rounds the input to the nearest multiple of interval. "
+            "Useful for modeling ADC quantization, encoder resolution, etc."
+        ),
+    ),
+
+    # ---- Group J: New Discrete ----------------------------------------------
+
+    "DiscreteTransferFcn": BlockSpec(
+        type_name="DiscreteTransferFcn",
+        display_name="Discrete Transfer Fcn",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "numerator":   ("1",    "z-domain numerator coefficients, highest power first (e.g. '1 0.5')"),
+            "denominator": ("1 -1", "z-domain denominator coefficients, highest power first (e.g. '1 -0.9')"),
+        },
+        description=(
+            "Discrete-time transfer function: H(z) = B(z)/A(z). "
+            "Enter polynomials as space-separated coefficients, highest power first. "
+            "Unlike Transfer Fcn, no bilinear conversion is applied — "
+            "the coefficients are used directly in a Direct-Form-II-Transposed IIR filter."
+        ),
+    ),
+
+    "MovingAverage": BlockSpec(
+        type_name="MovingAverage",
+        display_name="Moving Average",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("10", "Number of samples in the moving average window (>= 1)"),
+        },
+        description=(
+            "Computes the N-sample moving average of the input. "
+            "window=1 is a pass-through. "
+            "On STM32, implemented with a circular buffer."
+        ),
+    ),
+
+    # ---- Group K: New Lookup ------------------------------------------------
+
+    "Lookup2D": BlockSpec(
+        type_name="Lookup2D",
+        display_name="Lookup 2-D",
+        color="#f39c12",
+        inputs=[PortSpec("u0", "in"), PortSpec("u1", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "row_breakpoints": ("0 1",      "Row breakpoints, space-separated, strictly increasing"),
+            "col_breakpoints": ("0 1",      "Column breakpoints, space-separated, strictly increasing"),
+            "table":           ("0 1; 1 2", "Table data, rows separated by ';', cols by spaces. "
+                                            "Dimensions: len(row_bp) x len(col_bp)"),
+        },
+        description=(
+            "2-D lookup table with bilinear interpolation. "
+            "u0 indexes rows, u1 indexes columns. "
+            "Clamps to boundary for out-of-range inputs."
+        ),
+    ),
+
+    # ---- Group L: New STM32 HAL ---------------------------------------------
+
+    "EncoderRead": BlockSpec(
+        type_name="EncoderRead",
+        display_name="Encoder Read",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "timer":          ("TIM4",     "HAL timer handle name configured in encoder mode (e.g. TIM4)"),
+            "counts_per_rev": ("1000",     "Encoder counts per full revolution (PPR * 4 for quadrature)"),
+            "mode":           ("position", "Output mode: 'position' (radians) or 'velocity' (rad/s)"),
+            "sim_value":      ("0.0",      "Constant simulation output value"),
+        },
+        description=(
+            "Reads a quadrature encoder via TIM in encoder mode. "
+            "mode='position': y = counter / counts_per_rev * 2*pi (radians, wraps). "
+            "mode='velocity': y = delta_counts / counts_per_rev * 2*pi / step_s (rad/s). "
+            "Set the timer up in CubeMX as Encoder Mode (TI1TI2)."
+        ),
+    ),
+
+    # ---- Group M: Discontinuities ------------------------------------------
+
+    "Relay": BlockSpec(
+        type_name="Relay",
+        display_name="Relay",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "on_threshold":  ("0.5",  "Input level above which output switches to on_value"),
+            "off_threshold": ("-0.5", "Input level below which output switches to off_value"),
+            "on_value":      ("1.0",  "Output value when relay is on"),
+            "off_value":     ("0.0",  "Output value when relay is off"),
+        },
+        description=(
+            "Hysteresis on/off switch. Output switches to on_value when input exceeds "
+            "on_threshold, and to off_value when input falls below off_threshold. "
+            "Between the two thresholds the output holds its previous value."
+        ),
+    ),
+
+    "SaturationDynamic": BlockSpec(
+        type_name="SaturationDynamic",
+        display_name="Saturation Dynamic",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in"), PortSpec("upper", "in"), PortSpec("lower", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "default_upper": ("1.0",  "Default upper limit if upper port is unconnected"),
+            "default_lower": ("-1.0", "Default lower limit if lower port is unconnected"),
+        },
+        description=(
+            "Clamps input u to [lower, upper] where limits come from input ports. "
+            "If limit ports are unconnected, the default parameter values are used."
+        ),
+    ),
+
+    # ---- Group N: Logic (Signal Routing) -----------------------------------
+
+    "CompareToConstant": BlockSpec(
+        type_name="CompareToConstant",
+        display_name="Compare To Constant",
+        color="#27ae60",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "operator": ("==", "Comparison operator: == | != | < | > | <= | >="),
+            "constant": ("0.0", "Constant value to compare against"),
+        },
+        description="y = 1.0 if (u operator constant) is true, else 0.0.",
+    ),
+
+    "DetectRisePositive": BlockSpec(
+        type_name="DetectRisePositive",
+        display_name="Detect Rise Positive",
+        color="#27ae60",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "initial_condition": ("0.0", "Assumed value of input at t<0"),
+        },
+        description=(
+            "Outputs 1.0 for exactly one sample step when the input transitions "
+            "from <= 0 to > 0. Output is 0.0 at all other times."
+        ),
+    ),
+
+    "MultiportSwitch": BlockSpec(
+        type_name="MultiportSwitch",
+        display_name="Multiport Switch",
+        color="#27ae60",
+        inputs=[PortSpec("sel", "in"),
+                PortSpec("u0", "in"), PortSpec("u1", "in"),
+                PortSpec("u2", "in"), PortSpec("u3", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "num_inputs": ("4", "Number of data inputs to use (2–4). Extra ports are ignored."),
+        },
+        description=(
+            "Selects one of up to 4 data inputs based on the sel input. "
+            "sel is rounded to the nearest integer and clamped to [0, num_inputs-1]. "
+            "sel=0 → u0, sel=1 → u1, sel=2 → u2, sel=3 → u3."
+        ),
+    ),
+
+    # ---- Group O: Discrete (new) -------------------------------------------
+
+    "TransportDelay": BlockSpec(
+        type_name="TransportDelay",
+        display_name="Transport Delay",
+        color="#2c3e50",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "delay_samples":     ("10",  "Number of samples to delay (integer >= 1)"),
+            "initial_condition": ("0.0", "Output value during the initial delay period"),
+        },
+        description=(
+            "Delays the input signal by a fixed number of samples. "
+            "During the first delay_samples steps the output equals initial_condition."
+        ),
+    ),
+
+    # ---- Group P: STM32 HAL (new) ------------------------------------------
+
+    "UARTSend": BlockSpec(
+        type_name="UARTSend",
+        display_name="UART Send",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "usart":   ("USART1", "HAL USART handle name (e.g. USART1, USART2)"),
+            "format":  ("%.4f\r\n", "printf-style format string for the value"),
+            "timeout": ("10",     "HAL_UART_Transmit timeout in ms"),
+        },
+        description=(
+            "Transmits the input value over a UART port each model step. "
+            "Uses HAL_UART_Transmit with snprintf formatting. "
+            "In simulation, the input is captured and shown in the scope display."
+        ),
+    ),
+
+    "I2CRead": BlockSpec(
+        type_name="I2CRead",
+        display_name="I2C Read",
+        color="#00b8a9",
+        outputs=[PortSpec("y", "out")],
+        params={
+            "i2c":         ("I2C1",  "HAL I2C handle name (e.g. I2C1)"),
+            "device_addr": ("0x48",  "7-bit I2C device address (will be left-shifted by 1)"),
+            "reg_addr":    ("0x00",  "Register address to read from"),
+            "data_bytes":  ("2",     "Number of bytes to read (1 or 2)"),
+            "scale":       ("1.0",   "Scale factor applied to raw value: y = raw * scale"),
+            "sim_value":   ("0.0",   "Constant output value used during simulation"),
+        },
+        description=(
+            "Reads 1 or 2 bytes from an I2C device register each model step. "
+            "For 2 bytes, MSB first (big-endian). "
+            "y = (uint16_raw) * scale. "
+            "Uses HAL_I2C_Mem_Read."
+        ),
+    ),
+
+    "I2CWrite": BlockSpec(
+        type_name="I2CWrite",
+        display_name="I2C Write",
+        color="#00b8a9",
+        inputs=[PortSpec("u", "in")],
+        params={
+            "i2c":         ("I2C1",  "HAL I2C handle name (e.g. I2C1)"),
+            "device_addr": ("0x48",  "7-bit I2C device address (will be left-shifted by 1)"),
+            "reg_addr":    ("0x00",  "Register address to write to"),
+            "data_bytes":  ("2",     "Number of bytes to write (1 or 2)"),
+            "scale":       ("1.0",   "Scale factor: raw = (uint16_t)(u / scale)"),
+        },
+        description=(
+            "Writes 1 or 2 bytes to an I2C device register each model step. "
+            "For 2 bytes, MSB first (big-endian). raw = clamp(u/scale, 0, 65535). "
+            "Uses HAL_I2C_Mem_Write. In simulation the input is passed through for display."
+        ),
+    ),
+
+    # ---- Group Q: DSP -------------------------------------------------------
+
+    "FIRFilter": BlockSpec(
+        type_name="FIRFilter",
+        display_name="FIR Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "coefficients": ("0.25 0.25 0.25 0.25",
+                             "FIR tap weights b[0]..b[N-1], space-separated. "
+                             "y[k] = sum(b[i]*u[k-i])"),
+        },
+        description=(
+            "FIR (Finite Impulse Response) filter. "
+            "Enter tap weights as space-separated values; the filter length equals "
+            "the number of coefficients. "
+            "On STM32, uses a circular ring buffer for efficient computation."
+        ),
+    ),
+
+    "BiquadFilter": BlockSpec(
+        type_name="BiquadFilter",
+        display_name="Biquad Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "b0": ("1.0",  "Numerator coefficient b0"),
+            "b1": ("0.0",  "Numerator coefficient b1 (z\u207b\u00b9 term)"),
+            "b2": ("0.0",  "Numerator coefficient b2 (z\u207b\u00b2 term)"),
+            "a1": ("0.0",  "Denominator coefficient a1 (z\u207b\u00b9 term, sign as in H(z) denominator)"),
+            "a2": ("0.0",  "Denominator coefficient a2 (z\u207b\u00b2 term)"),
+        },
+        description=(
+            "Second-order IIR filter (biquad section) in Direct Form II. "
+            "H(z) = (b0 + b1\u00b7z\u207b\u00b9 + b2\u00b7z\u207b\u00b2) / (1 + a1\u00b7z\u207b\u00b9 + a2\u00b7z\u207b\u00b2). "
+            "Chain multiple blocks for higher-order filters. "
+            "Can implement low-pass, high-pass, band-pass, notch, and peak/shelf filters."
+        ),
+    ),
+
+    "RunningRMS": BlockSpec(
+        type_name="RunningRMS",
+        display_name="Running RMS",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("100", "Number of samples in the RMS window (>= 1)"),
+        },
+        description=(
+            "Computes the Root Mean Square of the input over a sliding window of N samples. "
+            "y = sqrt(mean(u\u00b2)) over the last window samples. "
+            "On STM32, uses a circular buffer of squared values."
+        ),
+    ),
+
+    "MedianFilter": BlockSpec(
+        type_name="MedianFilter",
+        display_name="Median Filter",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "window": ("5", "Window size (odd integer >= 3 recommended; max 15 for C codegen)"),
+        },
+        description=(
+            "Running median filter over the last N samples. "
+            "Effective at removing impulse noise (salt-and-pepper). "
+            "On STM32, uses an insertion-sort on the buffer (efficient for small windows)."
+        ),
+    ),
+
+    "NCO": BlockSpec(
+        type_name="NCO",
+        display_name="NCO",
+        color="#0e4d6e",
+        inputs=[PortSpec("freq", "in")],
+        outputs=[PortSpec("sin_out", "out"), PortSpec("cos_out", "out")],
+        params={
+            "amplitude":     ("1.0", "Output amplitude"),
+            "initial_phase": ("0.0", "Initial phase in degrees"),
+        },
+        description=(
+            "Numerically Controlled Oscillator. "
+            "Accepts a frequency input (Hz) and outputs sin and cos at that frequency. "
+            "Phase is accumulated each step: phi[k] = phi[k-1] + 2*pi*freq*dt. "
+            "Useful for lock-in amplifiers, synchronous detection, and modulation."
+        ),
+    ),
+
+    "PeakDetector": BlockSpec(
+        type_name="PeakDetector",
+        display_name="Peak Detector",
+        color="#0e4d6e",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "mode":       ("max",  "Peak mode: 'max' (track maximum) or 'abs_max' (track max absolute value)"),
+            "decay_rate": ("0.0",  "Peak decay rate per second (0 = hold forever). "
+                                   "y[k] = max(|u[k]|, y[k-1] - decay_rate*dt)"),
+            "initial":    ("0.0",  "Initial peak value"),
+        },
+        description=(
+            "Tracks and holds the peak value of the input signal. "
+            "mode='max': tracks maximum (signed). "
+            "mode='abs_max': tracks maximum absolute value. "
+            "decay_rate > 0 causes the held peak to gradually decay toward zero."
+        ),
+    ),
+
+    # ---- PythonFcn -----------------------------------------------------------
+    "PythonFcn": BlockSpec(
+        type_name="PythonFcn",
+        display_name="Python Fcn",
+        color="#00bcd4",
+        inputs=[
+            PortSpec("u0", "in"),
+            PortSpec("u1", "in"),
+            PortSpec("u2", "in"),
+            PortSpec("u3", "in"),
+        ],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "num_inputs": ("1",
+                "Number of active input ports (1–4). "
+                "Ports are named u0 … u3 on the block face."),
+            "code": ("u[0]",
+                "Python expression evaluated every simulation step.\n"
+                "Available names: u (list of inputs), t (time in seconds),\n"
+                "  math.*, numpy as np, abs, min, max, round.\n"
+                "The expression result becomes output y.\n"
+                "Multi-line: use semicolons to separate statements; last line is y.\n"
+                "Examples:\n"
+                "  u[0] * 2.0 + u[1]\n"
+                "  math.sin(2 * math.pi * t) * u[0]\n"
+                "  math.sqrt(u[0]**2 + u[1]**2)"),
+        },
+        description=(
+            "Evaluates an arbitrary Python expression each simulation step. "
+            "Inputs u0–u3 are available as the list u[]. "
+            "Output y = expression result. "
+            "Simple single-line expressions are auto-transpiled to C; "
+            "complex code emits a TODO stub in the generated main.c."
+        ),
+    ),
+
+    # -----------------------------------------------------------------------
+    # Cart-pendulum / control-systems blocks
+    # -----------------------------------------------------------------------
+
+    "WeightedSum": BlockSpec(
+        type_name="WeightedSum",
+        display_name="Weighted Sum",
+        color="#e67e22",
+        inputs=[
+            PortSpec("u0", "in"), PortSpec("u1", "in"),
+            PortSpec("u2", "in"), PortSpec("u3", "in"),
+            PortSpec("u4", "in"), PortSpec("u5", "in"),
+            PortSpec("u6", "in"), PortSpec("u7", "in"),
+        ],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "num_inputs": ("4", "Number of active inputs (1–8)"),
+            "gains":      ("1 1 1 1",
+                "Space-separated gain per input. "
+                "Must contain exactly num_inputs values. "
+                "Negative gains implement subtraction (u = -K·x for LQR)."),
+        },
+        description=(
+            "Computes y = g0·u0 + g1·u1 + … for full-state feedback. "
+            "Use negative gains to implement u = -K·x (LQR). "
+            "Equivalent to N Gain blocks + N Sum blocks in a single block."
+        ),
+    ),
+
+    "PlantODE": BlockSpec(
+        type_name="PlantODE",
+        display_name="Plant ODE",
+        color="#16a085",
+        inputs=[PortSpec("u", "in")],
+        outputs=[
+            PortSpec("y0", "out"), PortSpec("y1", "out"),
+            PortSpec("y2", "out"), PortSpec("y3", "out"),
+        ],
+        params={
+            "order":         ("2",
+                "Number of states (1–8). Each state is one ODE equation."),
+            "equations":     ("x[1]\n-9.81*math.sin(x[0]) - 0.1*x[1] + u",
+                "One Python expression per line (line i = dx[i]/dt). "
+                "Available: x (state vector), u (control input), t (time), math.*"),
+            "initial_state": ("0 0",
+                "Space-separated initial conditions. Must have exactly 'order' values."),
+            "num_outputs":   ("2",
+                "How many states to expose as output ports y0…y3 (must be ≤ order)."),
+        },
+        description=(
+            "Simulates a nonlinear ODE plant using 4th-order Runge-Kutta. "
+            "Designed for in-IDE closed-loop design (e.g. cart-pendulum, DC motor). "
+            "Codegen emits a simulation-only comment stub — the real plant is hardware."
+        ),
+    ),
+
+    "AngleUnwrap": BlockSpec(
+        type_name="AngleUnwrap",
+        display_name="Angle Unwrap",
+        color="#8e44ad",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "range": ("auto",
+                "'auto' = ±π radians (default). '360' = ±180 degrees."),
+        },
+        description=(
+            "Unwraps a wrapped angle signal to produce a continuous output. "
+            "Prevents ±π (or ±180°) discontinuities that break LQR feedback. "
+            "State: tracks accumulated offset between steps."
+        ),
+    ),
+
+    "HBridgeOut": BlockSpec(
+        type_name="HBridgeOut",
+        display_name="H-Bridge Out",
+        color="#c0392b",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("pin", "out")],
+        params={
+            "timer":         ("TIM2",  "PWM timer (TIM1–TIM17)"),
+            "channel":       ("1",     "Timer channel (1–4)"),
+            "dir_pin":       ("PB0",   "GPIO direction pin (HIGH = forward)"),
+            "dead_band_pct": ("5.0",
+                "Dead-band as % of max_duty — inputs below this are zeroed"),
+            "max_duty":      ("100.0",
+                "Input magnitude that maps to 100% PWM duty cycle"),
+        },
+        description=(
+            "Drives an H-bridge motor driver from a signed duty input. "
+            "Handles direction GPIO, PWM CCR register, and dead-band zeroing. "
+            "Replaces PWMOut + GpioOut for bidirectional motor control."
+        ),
+    ),
+
+    "DiscreteIntegratorAW": BlockSpec(
+        type_name="DiscreteIntegratorAW",
+        display_name="Integrator AW",
+        color="#2980b9",
+        inputs=[PortSpec("u", "in")],
+        outputs=[PortSpec("y", "out")],
+        params={
+            "gain_value":        ("1.0",   "Integrator gain K"),
+            "initial_condition": ("0.0",   "Initial state"),
+            "upper_limit":       ("1e10",  "Upper saturation limit"),
+            "lower_limit":       ("-1e10", "Lower saturation limit"),
+            "method":            ("Forward Euler",
+                "Integration method: Forward Euler, Backward Euler, Trapezoidal"),
+            "back_calc_coeff":   ("0.0",
+                "Back-calculation anti-windup coefficient. "
+                "0 = disabled (identical to DiscreteIntegrator). "
+                "Typical value: 1/Ki. "
+                "Prevents integrator wind-up when output saturates."),
+        },
+        description=(
+            "Discrete integrator with back-calculation anti-windup. "
+            "When saturated, feeds back (sat_out - state) * Kaw to prevent wind-up. "
+            "Set back_calc_coeff=0 for identical behaviour to DiscreteIntegrator."
+        ),
+    ),
 }
+
+# ---------------------------------------------------------------------------
+# Block palette categories  (order determines display order in the panel)
+# ---------------------------------------------------------------------------
+
+PALETTE_CATEGORIES: List[Tuple[str, List[str]]] = [
+    ("Sources", [
+        "SquareWave", "SineWave", "Ramp", "Clock", "PulseGenerator",
+        "Chirp", "RandomNumber", "Step", "Constant", "FromWorkspace", "Ground",
+    ]),
+    ("Math", [
+        "Sum", "Product", "Gain", "Abs", "Sign", "Sqrt", "MinMax",
+        "MathFunction", "RoundingFunction", "Divide", "Bias", "Polynomial",
+        "PythonFcn", "WeightedSum", "AngleUnwrap",
+    ]),
+    ("Nonlinear / Logic", [
+        "Saturation", "SaturationDynamic", "DeadZone", "Switch",
+        "MultiportSwitch", "RelationalOperator", "LogicalOperator",
+        "RateLimiter", "Quantizer", "CompareToConstant",
+        "DetectRisePositive", "Relay",
+    ]),
+    ("Continuous", [
+        "Integrator", "TransferFcn", "PID", "StateSpace", "ZeroPoleGain",
+    ]),
+    ("Discrete", [
+        "UnitDelay", "DiscreteIntegrator", "DiscreteIntegratorAW",
+        "ZeroOrderHold", "Derivative",
+        "DiscreteTransferFcn", "MovingAverage", "DiscreteStateSpace",
+        "TransportDelay",
+    ]),
+    ("Lookup", [
+        "Lookup1D", "Lookup2D",
+    ]),
+    ("DSP", [
+        "FIRFilter", "BiquadFilter", "RunningRMS", "MedianFilter",
+        "NCO", "PeakDetector",
+    ]),
+    ("STM32 HAL", [
+        "GpioIn", "GpioOut", "Ultrasonic", "ADC", "DAC", "PWMOut",
+        "TimerTick", "EncoderRead", "UARTSend", "I2CRead", "I2CWrite",
+        "HBridgeOut",
+    ]),
+    ("Control", [
+        "WeightedSum", "PlantODE", "AngleUnwrap", "DiscreteIntegratorAW",
+    ]),
+    ("Sinks", [
+        "Scope", "ToWorkspace",
+    ]),
+]
 
 
 @dataclass
@@ -327,14 +1486,24 @@ class BlockInstance:
     x: float
     y: float
     params: Dict[str, str] = field(default_factory=dict)
+    sample_time_ms: int = 0   # 0 = inherit base rate (step_ms); FreeRTOS only
+    width: float = 0.0    # 0 = use spec default (150 px)
+    height: float = 0.0   # 0 = use spec default (80 px)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "type": self.spec.type_name,
             "id": self.block_id,
             "x": self.x, "y": self.y,
             "params": self.params,
         }
+        if self.sample_time_ms != 0:
+            d["sample_time_ms"] = self.sample_time_ms
+        if self.width != 0.0:
+            d["width"] = self.width
+        if self.height != 0.0:
+            d["height"] = self.height
+        return d
 
 
 @dataclass
@@ -348,11 +1517,470 @@ class Connection:
         return self.__dict__.copy()
 
 
+@dataclass
+class ValidationError:
+    """A parameter validation problem on a specific block."""
+    block_id:   str   # which block instance
+    block_type: str   # e.g. "SquareWave"
+    param:      str   # which parameter field
+    code:       str   # short code, e.g. "E001"
+    message:    str   # human-readable description
+
+    def __str__(self) -> str:
+        return f"[{self.code}] {self.block_id} · {self.param}: {self.message}"
+
+
 # ---------------------------------------------------------------------------
 # Graphics items
 # ---------------------------------------------------------------------------
 
 PORT_RADIUS = 6.0
+
+# ---------------------------------------------------------------------------
+# Per-block-type display symbols
+# (type_name → primary text drawn in the centre of the block face)
+# ---------------------------------------------------------------------------
+_BLOCK_SYMBOL: Dict[str, str] = {
+    # Sources
+    "Constant":              "K",
+    "FromWorkspace":         "[ ]",
+    "Ground":                "⏚",
+    "RandomNumber":          "R?",
+    "Clock":                 "t",
+    # SquareWave / SineWave / Ramp / Step / PulseGenerator / Chirp
+    # are drawn as waveforms by _draw_block_symbol — no text entry needed
+    # Math
+    "Sum":                   "Σ",
+    "Product":               "×",
+    "Gain":                  "K",
+    "Abs":                   "|u|",
+    "Sign":                  "sgn",
+    "Sqrt":                  "√u",
+    "MinMax":                "min\nmax",
+    "MathFunction":          "f(u)",
+    "RoundingFunction":      "⌊u⌉",
+    "Divide":                "÷",
+    "Bias":                  "u+b",
+    "Polynomial":            "p(u)",
+    "PythonFcn":             "{ }",
+    # Nonlinear / Logic
+    "Saturation":            "sat",
+    "SaturationDynamic":     "sat\ndyn",
+    "DeadZone":              "dz",
+    "Switch":                "SW",
+    "MultiportSwitch":       "MUX",
+    "RelationalOperator":    "≥?",
+    "LogicalOperator":       "AND",
+    "RateLimiter":           "ṙ lim",
+    "Quantizer":             "Q",
+    "CompareToConstant":     "cmp",
+    "DetectRisePositive":    "↑",
+    "Relay":                 "relay",
+    # Continuous
+    "Integrator":            "∫",
+    "TransferFcn":           "H(s)",
+    "PID":                   "PID",
+    "StateSpace":            "ẋ=Ax",
+    "ZeroPoleGain":          "zpk",
+    # Discrete
+    "UnitDelay":             "z⁻¹",
+    "DiscreteIntegrator":    "1/z",
+    "ZeroOrderHold":         "ZOH",
+    "Derivative":            "Δ/Δt",
+    "DiscreteTransferFcn":   "H(z)",
+    "MovingAverage":         "MA",
+    "DiscreteStateSpace":    "xd",
+    "TransportDelay":        "τ",
+    # Lookup
+    "Lookup1D":              "LUT\n1-D",
+    "Lookup2D":              "LUT\n2-D",
+    # DSP
+    "FIRFilter":             "FIR",
+    "BiquadFilter":          "IIR",
+    "RunningRMS":            "RMS",
+    "MedianFilter":          "Med",
+    "NCO":                   "NCO",
+    "PeakDetector":          "peak",
+    # STM32 HAL
+    "GpioIn":                "▶ pin",
+    "GpioOut":               "pin ◀",
+    "Ultrasonic":            "HC\nSR04",
+    "ADC":                   "A/D",
+    "DAC":                   "D/A",
+    "PWMOut":                "PWM",
+    "TimerTick":             "tick",
+    "EncoderRead":           "ENC",
+    "UARTSend":              "UART\nTX",
+    "I2CRead":               "I²C\nRD",
+    "I2CWrite":              "I²C\nWR",
+    "HBridgeOut":            "H\n⇌",
+    # Control / cart-pendulum
+    "WeightedSum":           "Kx",
+    "PlantODE":              "ẋ=f\n(RK4)",
+    "AngleUnwrap":           "∠\nunwrap",
+    "DiscreteIntegratorAW":  "1/z\nAW",
+    # Sinks
+    "Scope":                 "scope",
+    "ToWorkspace":           "→ ws",
+}
+
+
+def _draw_block_symbol(painter: QPainter, rect: QRectF,
+                        type_name: str, params: dict = None) -> None:
+    """Draw a representative icon inside *rect* for the given block type.
+
+    Waveform-generating source blocks get a mini drawn waveform.
+    All other blocks get a bold text glyph from ``_BLOCK_SYMBOL``.
+    *params* is the block's live param dict; used by Gain to show the actual value.
+    """
+    import math as _m
+
+    painter.setRenderHint(QPainter.Antialiasing)
+    sym_col = QColor(255, 255, 255, 210)
+    W = rect.width()
+    H = rect.height()
+    cx = rect.center().x()
+    cy = rect.center().y()
+    L  = rect.left()
+    R  = rect.right()
+
+    # ---------------------------------------------------------------- helpers
+    def wave_pen(w=1.8):
+        p = QPen(sym_col, w)
+        p.setCapStyle(Qt.RoundCap)
+        p.setJoinStyle(Qt.RoundJoin)
+        return p
+
+    # ------------------------------------------------------------ SquareWave
+    if type_name in ("SquareWave", "PulseGenerator"):
+        painter.setPen(wave_pen())
+        painter.setBrush(Qt.NoBrush)
+        amp  = H * 0.38
+        seg  = W / 4.0
+        pts = [
+            QPointF(L + 2,            cy),
+            QPointF(L + 2,            cy - amp),
+            QPointF(L + 2 + seg,      cy - amp),
+            QPointF(L + 2 + seg,      cy),
+            QPointF(L + 2 + seg * 2,  cy),
+            QPointF(L + 2 + seg * 2,  cy - amp),
+            QPointF(L + 2 + seg * 3,  cy - amp),
+            QPointF(L + 2 + seg * 3,  cy),
+            QPointF(R - 2,            cy),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # -------------------------------------------------------------- SineWave
+    elif type_name == "SineWave":
+        painter.setPen(wave_pen())
+        painter.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        N = 48
+        for i in range(N + 1):
+            t = i / N
+            x = L + 2 + t * (W - 4)
+            y = cy - H * 0.40 * _m.sin(2 * _m.pi * t)
+            if i == 0: path.moveTo(x, y)
+            else:      path.lineTo(x, y)
+        painter.drawPath(path)
+
+    # ------------------------------------------------------------------ Ramp
+    elif type_name == "Ramp":
+        painter.setPen(wave_pen())
+        # flat then ramp /‾
+        pts = [
+            QPointF(L + 4,          cy + H * 0.32),
+            QPointF(cx - W * 0.12,  cy + H * 0.32),
+            QPointF(R - 4,          cy - H * 0.32),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ------------------------------------------------------------------ Step
+    elif type_name == "Step":
+        painter.setPen(wave_pen())
+        pts = [
+            QPointF(L + 4,    cy + H * 0.30),
+            QPointF(cx,       cy + H * 0.30),
+            QPointF(cx,       cy - H * 0.30),
+            QPointF(R - 4,    cy - H * 0.30),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ----------------------------------------------------------------- Chirp
+    elif type_name == "Chirp":
+        painter.setPen(wave_pen(1.5))
+        painter.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        N = 64
+        for i in range(N + 1):
+            t = i / N
+            x = L + 2 + t * (W - 4)
+            y = cy - H * 0.38 * _m.sin(2 * _m.pi * (0.8 * t + 2.4 * t * t))
+            if i == 0: path.moveTo(x, y)
+            else:      path.lineTo(x, y)
+        painter.drawPath(path)
+
+    # --------------------------------------------------------------- Gain (triangle)
+    elif type_name == "Gain":
+        painter.setPen(wave_pen(1.5))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 40)))
+        tri = QPolygonF([
+            QPointF(L + 6,   cy - H * 0.36),
+            QPointF(L + 6,   cy + H * 0.36),
+            QPointF(R - 6,   cy),
+        ])
+        painter.drawPolygon(tri)
+        # Label: show the actual gain value (or variable name) like Simulink
+        gain_raw = params.get("gain", "1.0") if params else "1.0"
+        try:
+            v = float(gain_raw)
+            gain_lbl = str(int(v)) if v == int(v) else f"{v:.3g}"
+        except (ValueError, TypeError):
+            gain_lbl = gain_raw          # workspace variable — show name as-is
+        font_size = 7 if len(gain_lbl) > 4 else 9
+        f = QFont(); f.setPointSize(font_size); f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(QPen(sym_col))
+        painter.drawText(QRectF(L + 8, cy - H * 0.28, W * 0.45, H * 0.56),
+                         Qt.AlignCenter, gain_lbl)
+
+    # --------------------------------------------------- Integrator (drawn ∫)
+    elif type_name == "Integrator":
+        f = QFont("Times New Roman"); f.setPointSize(28); f.setBold(False)
+        painter.setFont(f)
+        painter.setPen(QPen(sym_col))
+        painter.drawText(rect, Qt.AlignCenter, "∫")
+
+    # -------------------------------------------------------- Saturation (clamp shape)
+    elif type_name in ("Saturation", "SaturationDynamic"):
+        painter.setPen(wave_pen())
+        pts = [
+            QPointF(L + 4,          cy + H * 0.32),
+            QPointF(cx - W * 0.22,  cy + H * 0.32),
+            QPointF(cx + W * 0.22,  cy - H * 0.32),
+            QPointF(R - 4,          cy - H * 0.32),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ------------------------------------------------------- DeadZone
+    elif type_name == "DeadZone":
+        painter.setPen(wave_pen())
+        pts = [
+            QPointF(L + 4,          cy + H * 0.32),
+            QPointF(cx - W * 0.18,  cy + H * 0.32),
+            QPointF(cx - W * 0.18,  cy),
+            QPointF(cx + W * 0.18,  cy),
+            QPointF(cx + W * 0.18,  cy - H * 0.32),
+            QPointF(R - 4,          cy - H * 0.32),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # --------------------------------------------------------- Relay
+    elif type_name == "Relay":
+        painter.setPen(wave_pen())
+        # low plateau → jump → high plateau
+        pts = [
+            QPointF(L + 4,          cy + H * 0.30),
+            QPointF(cx - W * 0.08,  cy + H * 0.30),
+            QPointF(cx - W * 0.08,  cy - H * 0.30),
+            QPointF(cx + W * 0.08,  cy - H * 0.30),  # hysteresis gap
+            QPointF(cx + W * 0.08,  cy + H * 0.30),
+            QPointF(R - 4,          cy + H * 0.30),
+        ]
+        # draw two plateaus with vertical jump
+        painter.drawPolyline(QPolygonF([
+            QPointF(L + 4,         cy + H * 0.30),
+            QPointF(cx - W * 0.06, cy + H * 0.30),
+            QPointF(cx - W * 0.06, cy - H * 0.30),
+            QPointF(R - 4,         cy - H * 0.30),
+        ]))
+
+    # ------------------------------------------------------- ZeroOrderHold
+    elif type_name == "ZeroOrderHold":
+        painter.setPen(wave_pen())
+        step = W / 3.0
+        levels = [cy + H * 0.25, cy - H * 0.15, cy + H * 0.05, cy - H * 0.30]
+        pts = [QPointF(L + 2, levels[0])]
+        for i, lv in enumerate(levels):
+            x0 = L + 2 + i * step
+            x1 = L + 2 + (i + 1) * step
+            pts.append(QPointF(x0, lv))
+            pts.append(QPointF(x1, lv))
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ------------------------------------------------------- Quantizer (staircase)
+    elif type_name == "Quantizer":
+        painter.setPen(wave_pen())
+        step = W / 4.0
+        vstep = H * 0.22
+        pts = []
+        for i in range(5):
+            x0 = L + 2 + i * step
+            x1 = x0 + step
+            y  = cy + vstep * (2 - i)
+            pts += [QPointF(x0, y), QPointF(x1, y)]
+            if i < 4:
+                pts.append(QPointF(x1, y - vstep))
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ------------------------------------------------------- RateLimiter
+    elif type_name == "RateLimiter":
+        painter.setPen(wave_pen())
+        pts = [
+            QPointF(L + 4,   cy + H * 0.30),
+            QPointF(cx,      cy),
+            QPointF(R - 4,   cy - H * 0.30),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+        # dashed extension lines showing the clipped corners
+        painter.setPen(QPen(sym_col, 1.2, Qt.DashLine))
+        painter.drawLine(QPointF(L + 4, cy), QPointF(L + 4, cy + H * 0.30))
+        painter.drawLine(QPointF(R - 4, cy - H * 0.30), QPointF(R - 4, cy))
+
+    # ------------------------------------------------------- Derivative
+    elif type_name == "Derivative":
+        f = QFont(); f.setPointSize(11); f.setBold(True); f.setItalic(True)
+        painter.setFont(f)
+        painter.setPen(QPen(sym_col))
+        painter.drawText(rect, Qt.AlignCenter, "d/dt")
+
+    # ------------------------------------------------------- Scope (mini screen)
+    elif type_name == "Scope":
+        scr = rect.adjusted(4, 2, -4, -2)
+        painter.setPen(QPen(sym_col, 1.2))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 80)))
+        painter.drawRoundedRect(scr, 3, 3)
+        # mini sine on screen
+        painter.setPen(QPen(QColor("#00e676"), 1.5))
+        path = QPainterPath()
+        N = 30
+        for i in range(N + 1):
+            t = i / N
+            x = scr.left() + 3 + t * (scr.width() - 6)
+            y = scr.center().y() - scr.height() * 0.32 * _m.sin(2 * _m.pi * t * 1.5)
+            if i == 0: path.moveTo(x, y)
+            else:      path.lineTo(x, y)
+        painter.drawPath(path)
+
+    # ------------------------------------------------------- FIRFilter / BiquadFilter frequency response
+    elif type_name in ("FIRFilter", "BiquadFilter"):
+        painter.setPen(wave_pen(1.5))
+        painter.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        N = 40
+        cutoff = 0.45
+        for i in range(N + 1):
+            t = i / N
+            x = L + 2 + t * (W - 4)
+            mag = 1.0 if t < cutoff else _m.exp(-18 * (t - cutoff))
+            y = cy + H * 0.35 - H * 0.70 * mag
+            if i == 0: path.moveTo(x, y)
+            else:      path.lineTo(x, y)
+        painter.drawPath(path)
+
+    # ------------------------------------------------------- PWMOut
+    elif type_name == "PWMOut":
+        painter.setPen(wave_pen())
+        duty = 0.35
+        seg  = W / 2.5
+        pts = [
+            QPointF(L + 4,              cy),
+            QPointF(L + 4,              cy - H * 0.32),
+            QPointF(L + 4 + seg * duty, cy - H * 0.32),
+            QPointF(L + 4 + seg * duty, cy),
+            QPointF(L + 4 + seg,        cy),
+            QPointF(L + 4 + seg,        cy - H * 0.32),
+            QPointF(L + 4 + seg * (1 + duty), cy - H * 0.32),
+            QPointF(L + 4 + seg * (1 + duty), cy),
+            QPointF(R - 4,              cy),
+        ]
+        painter.drawPolyline(QPolygonF(pts))
+
+    # ------------------------------------------------------- PythonFcn
+    elif type_name == "PythonFcn":
+        # Draw { } brackets
+        f = QFont("Consolas", 20); f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(QPen(sym_col))
+        painter.drawText(rect.adjusted(0, -4, 0, 0), Qt.AlignCenter, "{ }")
+
+    # ------------------------------------------------------- Default: text glyph
+    else:
+        text = _BLOCK_SYMBOL.get(type_name, type_name[:4])
+        lines = text.split("\n")
+        if len(lines) > 1:
+            # two-line symbol
+            f = QFont(); f.setPointSize(10); f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(QPen(sym_col))
+            painter.drawText(rect, Qt.AlignCenter, text)
+        else:
+            n = len(text)
+            pt = 22 if n <= 2 else 15 if n <= 4 else 11
+            f = QFont(); f.setPointSize(pt); f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(QPen(sym_col))
+            painter.drawText(rect, Qt.AlignCenter, text)
+
+
+class ResizeHandle(QGraphicsRectItem):
+    """Small square handle on the edge of a BlockItem for resizing."""
+
+    _SIZE = 9.0
+    _CURSORS = {
+        "tl": Qt.SizeFDiagCursor, "tc": Qt.SizeVerCursor,  "tr": Qt.SizeBDiagCursor,
+        "ml": Qt.SizeHorCursor,                              "mr": Qt.SizeHorCursor,
+        "bl": Qt.SizeBDiagCursor, "bc": Qt.SizeVerCursor,  "br": Qt.SizeFDiagCursor,
+    }
+
+    def __init__(self, parent: "BlockItem", pos_key: str):
+        s = self._SIZE
+        super().__init__(-s / 2, -s / 2, s, s, parent)
+        self.pos_key = pos_key
+        self._block  = parent
+        self.setBrush(QBrush(QColor("#ffd54a")))
+        self.setPen(QPen(QColor("#333"), 1))
+        self.setVisible(False)
+        self.setZValue(10)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(self._CURSORS.get(pos_key, Qt.SizeAllCursor))
+        # drag state
+        self._press_scene: Optional[QPointF] = None
+        self._orig_w = 0.0
+        self._orig_h = 0.0
+        self._orig_pos: Optional[QPointF] = None
+
+    def hoverEnterEvent(self, ev):
+        self.setBrush(QBrush(QColor("#fff176")))
+
+    def hoverLeaveEvent(self, ev):
+        self.setBrush(QBrush(QColor("#ffd54a")))
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._press_scene = ev.scenePos()
+            self._orig_w      = self._block.WIDTH
+            self._orig_h      = self._block.HEIGHT
+            self._orig_pos    = QPointF(self._block.pos())
+            ev.accept()
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._press_scene is not None:
+            dx = ev.scenePos().x() - self._press_scene.x()
+            dy = ev.scenePos().y() - self._press_scene.y()
+            self._block.apply_resize(
+                self.pos_key, dx, dy,
+                self._orig_w, self._orig_h, self._orig_pos,
+            )
+            ev.accept()
+        else:
+            super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._press_scene = None
+        ev.accept()
 
 
 class PortItem(QGraphicsRectItem):
@@ -369,11 +1997,13 @@ class PortItem(QGraphicsRectItem):
         self.setToolTip(f"{'▶ out' if direction == 'out' else '◀ in'}: {name}")
 
     def hoverEnterEvent(self, ev):
+        self.prepareGeometryChange()
         self.setBrush(QBrush(QColor("#ffd54a")))
         self.setRect(-PORT_RADIUS * 1.5, -PORT_RADIUS * 1.5,
                      PORT_RADIUS * 3, PORT_RADIUS * 3)
 
     def hoverLeaveEvent(self, ev):
+        self.prepareGeometryChange()
         self.setBrush(QBrush(QColor("#222")))
         self.setRect(-PORT_RADIUS, -PORT_RADIUS, PORT_RADIUS * 2, PORT_RADIUS * 2)
 
@@ -391,17 +2021,75 @@ class BlockItem(QGraphicsRectItem):
     HEIGHT = 80.0
 
     def __init__(self, instance: BlockInstance):
+        self.WIDTH  = instance.width  if instance.width  > 0 else 150.0
+        self.HEIGHT = instance.height if instance.height > 0 else 80.0
         super().__init__(0, 0, self.WIDTH, self.HEIGHT)
         self.instance = instance
         self.setBrush(QBrush(QColor(instance.spec.color)))
         self.setPen(QPen(QColor("#1b1b1b"), 1.5))
+        self._has_error: bool = False
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemSendsGeometryChanges
         )
         self.setPos(instance.x, instance.y)
+        self._resize_handles: List["ResizeHandle"] = []
         self._make_ports()
+
+    def set_error_highlight(self, on: bool) -> None:
+        """Mark or unmark the block as having a validation error."""
+        self._has_error = on
+        if on:
+            self.setPen(QPen(QColor("#ff4444"), 3))
+        else:
+            self.setPen(QPen(QColor("#1b1b1b"), 1.5))
+        self.update()
+
+    def _reposition_ports(self) -> None:
+        """Move existing port items to match current WIDTH/HEIGHT."""
+        ins  = self.instance.spec.inputs
+        outs = self.instance.spec.outputs
+        for i, port in enumerate(self.input_ports):
+            port.setPos(0, (i + 1) * self.HEIGHT / (len(ins) + 1))
+        for i, port in enumerate(self.output_ports):
+            port.setPos(self.WIDTH, (i + 1) * self.HEIGHT / (len(outs) + 1))
+
+    def _update_handles(self) -> None:
+        """Reposition resize handle items to match current WIDTH/HEIGHT."""
+        W, H = self.WIDTH, self.HEIGHT
+        _pos = {
+            "tl": (0,   0),   "tc": (W/2, 0),   "tr": (W,   0),
+            "ml": (0,   H/2),                    "mr": (W,   H/2),
+            "bl": (0,   H),   "bc": (W/2, H),   "br": (W,   H),
+        }
+        for rh in getattr(self, '_resize_handles', []):
+            x, y = _pos[rh.pos_key]
+            rh.setPos(x, y)
+
+    def apply_resize(self, pos_key: str, dx: float, dy: float,
+                     orig_w: float, orig_h: float, orig_pos: QPointF) -> None:
+        """Apply a resize drag from handle *pos_key* (delegates to pure-math helper)."""
+        new_w, new_h, new_x, new_y = _apply_resize_math(
+            pos_key, dx, dy, orig_w, orig_h, orig_pos.x(), orig_pos.y()
+        )
+
+        self.WIDTH  = new_w
+        self.HEIGHT = new_h
+        self.instance.width  = new_w
+        self.instance.height = new_h
+
+        self.prepareGeometryChange()
+        self.setRect(0, 0, new_w, new_h)
+        self.setPos(new_x, new_y)
+        self.instance.x = new_x
+        self.instance.y = new_y
+
+        self._reposition_ports()
+        self._update_handles()
+        if self.scene():
+            for conn in self.scene().connection_items:
+                conn.update_path()
 
     def _make_ports(self) -> None:
         self.input_ports: List[PortItem] = []
@@ -418,22 +2106,91 @@ class BlockItem(QGraphicsRectItem):
             port = PortItem(self, p.name, "out", i)
             port.setPos(self.WIDTH, y)
             self.output_ports.append(port)
+        # Resize handles (8 positions)
+        self._resize_handles = []
+        for pk in ("tl", "tc", "tr", "ml", "mr", "bl", "bc", "br"):
+            rh = ResizeHandle(self, pk)
+            self._resize_handles.append(rh)
+        self._update_handles()
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
-        super().paint(painter, option, widget)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # ── Background rounded rect ──────────────────────────────────────────
+        bg = QColor(self.instance.spec.color)
+        if self.isSelected():
+            border_pen = QPen(QColor("#ffd54a"), 2.5)
+        elif self._has_error:
+            border_pen = QPen(QColor("#ff4444"), 3)
+        else:
+            border_pen = QPen(QColor("#111111"), 1.5)
+        painter.setBrush(QBrush(bg))
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(self.rect(), 8, 8)
+
+        # Subtle top-highlight stripe (lighter shade of block colour)
+        lighter = bg.lighter(140)
+        lighter.setAlpha(90)
+        stripe = QRectF(self.rect().left() + 1.5, self.rect().top() + 1.5,
+                        self.rect().width() - 3, self.HEIGHT * 0.28)
+        painter.setBrush(QBrush(lighter))
+        painter.setPen(Qt.NoPen)
+        # clip the stripe to a rounded top
+        stripe_path = QPainterPath()
+        stripe_path.addRoundedRect(stripe, 6, 6)
+        painter.drawPath(stripe_path)
+
+        W, H = self.WIDTH, self.HEIGHT
+
+        # ── Block name (top strip) ────────────────────────────────────────────
+        name_right = -24 if self._has_error else -6
+        f_name = QFont(); f_name.setBold(True); f_name.setPointSize(9)
+        painter.setFont(f_name)
         painter.setPen(QPen(QColor("white")))
-        f = QFont(); f.setBold(True); f.setPointSize(10)
-        painter.setFont(f)
         painter.drawText(
-            self.rect().adjusted(5, 5, -5, -self.HEIGHT/2),
-            Qt.AlignLeft | Qt.AlignTop, self.instance.spec.display_name,
+            self.rect().adjusted(6, 4, name_right, -(H * 0.54)),
+            Qt.AlignHCenter | Qt.AlignVCenter,
+            self.instance.spec.display_name,
         )
-        f2 = QFont(); f2.setPointSize(8)
-        painter.setFont(f2)
+
+        # ── Symbol (centre area) ─────────────────────────────────────────────
+        sym_rect = QRectF(
+            self.rect().left()  + 4,
+            self.rect().top()   + H * 0.30,
+            W - 8,
+            H * 0.46,
+        )
+        _draw_block_symbol(painter, sym_rect, self.instance.spec.type_name,
+                           self.instance.params)
+
+        # ── Block ID (bottom strip, dimmed) ───────────────────────────────────
+        f_id = QFont(); f_id.setPointSize(7)
+        painter.setFont(f_id)
+        painter.setPen(QPen(QColor(255, 255, 255, 130)))
         painter.drawText(
-            self.rect().adjusted(5, self.HEIGHT/2, -5, -5),
-            Qt.AlignLeft | Qt.AlignBottom, f"#{self.instance.block_id}",
+            self.rect().adjusted(4, H * 0.80, -4, -3),
+            Qt.AlignHCenter | Qt.AlignBottom,
+            f"#{self.instance.block_id}",
         )
+
+        # ── Error badge (top-right corner) ───────────────────────────────────
+        if self._has_error:
+            badge = QRectF(W - 22, 4, 18, 18)
+            painter.setBrush(QBrush(QColor("#ff3333")))
+            painter.setPen(QPen(QColor("#cc0000"), 1))
+            painter.drawEllipse(badge)
+            fb = QFont(); fb.setBold(True); fb.setPointSize(9)
+            painter.setFont(fb)
+            painter.setPen(QPen(QColor("white")))
+            painter.drawText(badge, Qt.AlignCenter, "!")
+
+    def boundingRect(self) -> QRectF:
+        # Ports sit on the block edge and their rect extends PORT_RADIUS
+        # beyond the block in all directions.  Expanding the bounding rect
+        # by PORT_RADIUS * 1.5 ensures Qt invalidates the full dirty region
+        # (including the port squares) when this item moves, preventing ghosts.
+        m = PORT_RADIUS * 1.5
+        return super().boundingRect().adjusted(-m, -m, m, m)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -442,11 +2199,118 @@ class BlockItem(QGraphicsRectItem):
             if self.scene() is not None:
                 for conn in getattr(self.scene(), "connection_items", []):
                     conn.update_path()
+        elif change == QGraphicsItem.ItemSelectedChange:
+            for rh in getattr(self, '_resize_handles', []):
+                rh.setVisible(bool(value))
         return super().itemChange(change, value)
 
 
+# ---------------------------------------------------------------------------
+# Pure-math helpers — no Qt dependency; importable for unit tests
+# ---------------------------------------------------------------------------
+
+def _wire_auto_waypoints(p1x: float, p1y: float,
+                          p2x: float, p2y: float) -> List[Tuple[float, float]]:
+    """Return orthogonal elbow waypoints as plain (x, y) tuples (no Qt)."""
+    if p2x >= p1x + 2:
+        mx = (p1x + p2x) * 0.5
+        return [(mx, p1y), (mx, p2y)]
+    M = 36.0
+    my = min(p1y, p2y) - M
+    return [
+        (p1x + M, p1y),
+        (p1x + M, my),
+        (p2x - M, my),
+        (p2x - M, p2y),
+    ]
+
+
+def _wire_move_seg(waypoints: List[Tuple[float, float]],
+                   si: int, ddx: float, ddy: float) -> List[Tuple[float, float]]:
+    """Move interior segment *si* of an orthogonal wire.
+
+    Returns updated waypoints list (same length).
+    First/last segment indices (si=0 or si=n) are non-movable and returned unchanged.
+    """
+    n = len(waypoints)
+    if not (0 < si < n):
+        return list(waypoints)
+    wps = list(waypoints)
+    a, b = wps[si - 1], wps[si]
+    horiz = abs(b[1] - a[1]) < abs(b[0] - a[0])
+    if horiz:
+        wps[si - 1] = (a[0],        a[1] + ddy)
+        wps[si]     = (b[0],        b[1] + ddy)
+    else:
+        wps[si - 1] = (a[0] + ddx,  a[1])
+        wps[si]     = (b[0] + ddx,  b[1])
+    return wps
+
+
+def _apply_resize_math(pos_key: str,
+                        dx: float, dy: float,
+                        orig_w: float, orig_h: float,
+                        orig_x: float, orig_y: float,
+                        min_w: float = 80.0,
+                        min_h: float = 50.0) -> Tuple[float, float, float, float]:
+    """Compute new (w, h, x, y) after dragging resize handle *pos_key*.
+
+    Left/top handles shift position so the opposite edge stays fixed.
+    Returns (new_w, new_h, new_x, new_y).  No Qt required.
+    """
+    new_w, new_h = orig_w, orig_h
+    new_x, new_y = orig_x, orig_y
+    if "r" in pos_key:
+        new_w = max(min_w, orig_w + dx)
+    if "l" in pos_key:
+        new_w = max(min_w, orig_w - dx)
+        new_x = orig_x + (orig_w - new_w)
+    if "b" in pos_key:
+        new_h = max(min_h, orig_h + dy)
+    if "t" in pos_key:
+        new_h = max(min_h, orig_h - dy)
+        new_y = orig_y + (orig_h - new_h)
+    return new_w, new_h, new_x, new_y
+
+
+_ARROW_SIZE = 9.0   # pixels — filled arrowhead at wire destination
+
+
+def _ortho_wire(p1: QPointF, p2: QPointF) -> QPainterPath:
+    """Build an orthogonal (right-angle) wire path from p1 to p2.
+
+    For forward connections (p2 is to the right of p1):
+        p1 → mid-x at p1.y → mid-x at p2.y → p2
+
+    For feedback / backward connections:
+        p1 → exit stub → route above both blocks → entry stub → p2
+    """
+    path = QPainterPath(p1)
+    MARGIN = 36.0
+
+    if p2.x() >= p1.x() + 2:
+        mid_x = (p1.x() + p2.x()) * 0.5
+        path.lineTo(mid_x, p1.y())
+        path.lineTo(mid_x, p2.y())
+        path.lineTo(p2)
+    else:
+        # Feedback: route above (or below, whichever is shorter)
+        exit_x  = p1.x() + MARGIN
+        enter_x = p2.x() - MARGIN
+        above_y = min(p1.y(), p2.y()) - MARGIN
+        below_y = max(p1.y(), p2.y()) + MARGIN
+        mid_y = above_y if abs(above_y) < abs(below_y) else below_y
+        path.lineTo(exit_x,  p1.y())
+        path.lineTo(exit_x,  mid_y)
+        path.lineTo(enter_x, mid_y)
+        path.lineTo(enter_x, p2.y())
+        path.lineTo(p2)
+
+    return path
+
+
 class ConnectionItem(QGraphicsPathItem):
-    """Bezier wire between two ports."""
+    """Orthogonal (right-angle) wire between two ports."""
 
     _PEN_NORMAL   = QPen(QColor("#eeeeee"), 2)
     _PEN_HOVER    = QPen(QColor("#ffd54a"), 3)
@@ -461,19 +2325,69 @@ class ConnectionItem(QGraphicsPathItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.PointingHandCursor)
+        self._waypoints: List[QPointF] = []
+        self._auto_route: bool = True
+        self._drag_seg: int = -1
+        self._drag_last: QPointF = QPointF()
+        self._hovering: bool = False
         self.update_path()
 
     def update_path(self) -> None:
         p1 = self.src.scenePos()
         p2 = self.dst.scenePos()
-        dx = max(40.0, abs(p2.x() - p1.x()) * 0.5)
+        if self._auto_route or not self._waypoints:
+            self._waypoints = self._auto_waypoints(p1, p2)
+        else:
+            self._pin_waypoints(p1, p2)
+        self._rebuild(p1, p2)
+
+    def _auto_waypoints(self, p1: QPointF, p2: QPointF) -> List[QPointF]:
+        """Compute default orthogonal elbow corners (delegates to pure-math helper)."""
+        return [QPointF(x, y)
+                for x, y in _wire_auto_waypoints(p1.x(), p1.y(), p2.x(), p2.y())]
+
+    def _pin_waypoints(self, p1: QPointF, p2: QPointF) -> None:
+        """Adapt stored waypoints to new port positions (block moved)."""
+        if self._waypoints:
+            w = self._waypoints[0]
+            self._waypoints[0] = QPointF(w.x(), p1.y())
+            w = self._waypoints[-1]
+            self._waypoints[-1] = QPointF(w.x(), p2.y())
+
+    def _rebuild(self, p1: QPointF = None, p2: QPointF = None) -> None:
+        if p1 is None: p1 = self.src.scenePos()
+        if p2 is None: p2 = self.dst.scenePos()
         path = QPainterPath(p1)
-        path.cubicTo(
-            QPointF(p1.x() + dx, p1.y()),
-            QPointF(p2.x() - dx, p2.y()),
-            p2,
-        )
+        for wp in self._waypoints:
+            path.lineTo(wp)
+        path.lineTo(p2)
         self.setPath(path)
+
+    def _seg_at(self, sp: QPointF) -> int:
+        """Return segment index closest to sp, or -1 if farther than 12 px."""
+        import math
+        p1 = self.src.scenePos()
+        p2 = self.dst.scenePos()
+        pts = [p1] + self._waypoints + [p2]
+        best, best_d = -1, 12.0
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            dx, dy = b.x() - a.x(), b.y() - a.y()
+            if dx == 0 and dy == 0:
+                continue
+            t = max(0.0, min(1.0,
+                ((sp.x()-a.x())*dx + (sp.y()-a.y())*dy) / (dx*dx + dy*dy)))
+            d = math.hypot(sp.x() - (a.x()+t*dx), sp.y() - (a.y()+t*dy))
+            if d < best_d:
+                best_d, best = d, i
+        return best
+
+    def _move_seg(self, si: int, ddx: float, ddy: float) -> None:
+        """Move segment si perpendicular to its direction (delegates to pure-math helper)."""
+        flat = [(wp.x(), wp.y()) for wp in self._waypoints]
+        updated = _wire_move_seg(flat, si, ddx, ddy)
+        self._waypoints = [QPointF(x, y) for x, y in updated]
+        self._rebuild()
 
     def shape(self):
         # Widen the hit area so the wire is easy to click.
@@ -484,17 +2398,100 @@ class ConnectionItem(QGraphicsPathItem):
         return ps.createStroke(self.path())
 
     def hoverEnterEvent(self, ev):
+        self._hovering = True
         if not self.isSelected():
             self.setPen(self._PEN_HOVER)
+        self.update()
 
     def hoverLeaveEvent(self, ev):
+        self._hovering = False
         if not self.isSelected():
             self.setPen(self._PEN_NORMAL)
+        self.update()
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemSelectedChange:
             self.setPen(self._PEN_SELECTED if value else self._PEN_NORMAL)
+            self.update()   # so handles appear/disappear
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            si = self._seg_at(event.scenePos())
+            n  = len(self._waypoints)
+            if si >= 0 and 0 < si < n:
+                self._drag_seg  = si
+                self._drag_last = event.scenePos()
+                self.setSelected(True)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_seg >= 0:
+            sp  = event.scenePos()
+            ddx = sp.x() - self._drag_last.x()
+            ddy = sp.y() - self._drag_last.y()
+            self._auto_route = False
+            self._move_seg(self._drag_seg, ddx, ddy)
+            self._drag_last = sp
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_seg >= 0:
+            self._drag_seg = -1
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click resets wire to auto-routing."""
+        self._auto_route = True
+        self._waypoints  = []
+        self.update_path()
+        event.accept()
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # ── arrowhead at destination ────────────────────────────────────────
+        p2  = self.dst.scenePos()
+        col = self.pen().color()
+        s   = _ARROW_SIZE
+        painter.setBrush(QBrush(col))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon(QPolygonF([
+            p2,
+            QPointF(p2.x() - s, p2.y() - s * 0.45),
+            QPointF(p2.x() - s, p2.y() + s * 0.45),
+        ]))
+
+        # ── segment drag handles (shown when selected or hovered) ──────────
+        if not (self.isSelected() or self._hovering):
+            return
+        p1   = self.src.scenePos()
+        p2p  = self.dst.scenePos()
+        pts  = [p1] + self._waypoints + [p2p]
+        n    = len(self._waypoints)
+        painter.setPen(QPen(QColor("#222"), 1))
+        for i in range(len(pts) - 1):
+            if not (0 < i < n):
+                continue                   # skip first and last segments
+            a, b = pts[i], pts[i + 1]
+            seg_len = ((b.x()-a.x())**2 + (b.y()-a.y())**2) ** 0.5
+            if seg_len < 16:
+                continue
+            mx = (a.x() + b.x()) * 0.5
+            my = (a.y() + b.y()) * 0.5
+            horiz = abs(b.y()-a.y()) < abs(b.x()-a.x())
+            painter.setBrush(QBrush(QColor("#ffd54a")))
+            if horiz:
+                painter.drawRect(QRectF(mx - 9, my - 4, 18, 8))
+            else:
+                painter.drawRect(QRectF(mx - 4, my - 9, 8, 18))
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +2501,11 @@ class ConnectionItem(QGraphicsPathItem):
 class BlockScene(QGraphicsScene):
 
     block_selected = pyqtSignal(object)  # BlockItem or None
+
+    # Class-level clipboard — persists across operations, shared within one process.
+    # {"blocks": [dict, ...], "connections": [dict, ...]}
+    _clipboard:    dict = {}
+    _paste_offset: int  = 0   # stagger counter: +20px per successive paste
 
     def __init__(self) -> None:
         super().__init__()
@@ -593,15 +2595,7 @@ class BlockScene(QGraphicsScene):
         if self._drag_wire is None or self._pending_src is None:
             return
         p1 = self._pending_src.scenePos()
-        p2 = cursor
-        dx = max(40.0, abs(p2.x() - p1.x()) * 0.5)
-        path = QPainterPath(p1)
-        path.cubicTo(
-            QPointF(p1.x() + dx, p1.y()),
-            QPointF(p2.x() - dx, p2.y()),
-            p2,
-        )
-        self._drag_wire.setPath(path)
+        self._drag_wire.setPath(_ortho_wire(p1, cursor))
 
     def _cancel_drag(self) -> None:
         if self._drag_wire is not None:
@@ -670,7 +2664,88 @@ class BlockScene(QGraphicsScene):
                 elif isinstance(it, ConnectionItem):
                     self.remove_connection_item(it)
             return
+        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self._copy_selected()
+            return
+        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            self._paste_clipboard()
+            return
         super().keyPressEvent(event)
+
+    def _copy_selected(self) -> None:
+        """Ctrl+C — serialise selected blocks + internal wires to the class clipboard."""
+        sel_blocks = [it for it in self.selectedItems() if isinstance(it, BlockItem)]
+        if not sel_blocks:
+            return
+        sel_ids = {b.instance.block_id for b in sel_blocks}
+        block_dicts = [b.instance.to_dict() for b in sel_blocks]
+        # Only keep connections where BOTH endpoints are inside the selection.
+        conn_dicts = [
+            {"src_block": c.src_block, "src_port": c.src_port,
+             "dst_block": c.dst_block, "dst_port": c.dst_port}
+            for c in self.connections
+            if c.src_block in sel_ids and c.dst_block in sel_ids
+        ]
+        BlockScene._clipboard    = {"blocks": block_dicts, "connections": conn_dicts}
+        BlockScene._paste_offset = 0   # reset stagger so first paste lands at +20 px
+
+    def _paste_clipboard(self) -> None:
+        """Ctrl+V — duplicate clipboard blocks with new IDs; restore internal wires."""
+        if not BlockScene._clipboard:
+            return
+        STEP = 20
+        BlockScene._paste_offset += 1
+        off = STEP * BlockScene._paste_offset   # 20, 40, 60 … px stagger
+
+        id_map:    dict = {}   # old block_id → new block_id
+        new_items: list = []
+
+        # ── 1. Create new blocks at offset positions ──────────────────────
+        for bd in BlockScene._clipboard["blocks"]:
+            tname  = bd["type"]
+            new_id = self.next_id(tname)
+            id_map[bd["id"]] = new_id
+            spec = BLOCK_CATALOG[tname]
+            inst = BlockInstance(
+                spec=spec, block_id=new_id,
+                x=bd["x"] + off, y=bd["y"] + off,
+                params=dict(bd["params"]),
+            )
+            inst.sample_time_ms = int(bd.get("sample_time_ms", 0))
+            w = float(bd.get("width",  0.0))
+            h = float(bd.get("height", 0.0))
+            if w > 0:
+                inst.width  = w
+            if h > 0:
+                inst.height = h
+            item = BlockItem(inst)
+            self.addItem(item)
+            self.blocks[new_id] = item
+            new_items.append(item)
+
+        # ── 2. Re-wire connections that were internal to the copied group ──
+        for cd in BlockScene._clipboard["connections"]:
+            src_id = id_map.get(cd["src_block"])
+            dst_id = id_map.get(cd["dst_block"])
+            if not (src_id and dst_id):
+                continue
+            src_item = self.blocks.get(src_id)
+            dst_item = self.blocks.get(dst_id)
+            if not (src_item and dst_item):
+                continue
+            src_port = next(
+                (p for p in src_item.output_ports if p.port_name == cd["src_port"]),
+                None)
+            dst_port = next(
+                (p for p in dst_item.input_ports  if p.port_name == cd["dst_port"]),
+                None)
+            if src_port and dst_port:
+                self.add_connection(src_port, dst_port)
+
+        # ── 3. Select the newly pasted blocks so the user can drag them ───
+        self.clearSelection()
+        for item in new_items:
+            item.setSelected(True)
 
     # --- serialization ----------------------------------------------------
 
@@ -680,6 +2755,68 @@ class BlockScene(QGraphicsScene):
             "connections": [c.to_dict() for c in self.connections],
         }
 
+    def load_from_dict(self, data: dict) -> None:
+        """Clear the canvas and rebuild from a saved model dict.
+
+        This is safer than calling __init__() again because it keeps the
+        QGraphicsScene object alive (preserving all Qt signal connections).
+        """
+        # Remove all Qt graphics items and reset Python-level state.
+        self.clear()                        # removes all QGraphicsItems
+        self.blocks.clear()
+        self.connections.clear()
+        self.connection_items.clear()
+        self._pending_src = None
+        self._drag_wire   = None
+        self._highlighted_port = None
+        self._id_counter  = 1
+
+        # Restore blocks, preserving saved IDs and positions.
+        positions: Dict[str, "BlockItem"] = {}
+        for b in data.get("blocks", []):
+            if b["type"] not in BLOCK_CATALOG:
+                continue  # skip unknown block types gracefully
+            item = self.add_block_by_type(b["type"], QPointF(b["x"], b["y"]))
+            # Overwrite the auto-generated ID with the saved one.
+            old_id = item.instance.block_id
+            self.blocks.pop(old_id, None)
+            item.instance.block_id = b["id"]
+            item.instance.params.update(b.get("params", {}))
+            item.instance.sample_time_ms = int(b.get("sample_time_ms", 0))
+            w = float(b.get("width",  0.0))
+            h = float(b.get("height", 0.0))
+            if w > 0:
+                item.instance.width  = w
+                item.WIDTH  = w
+                item.setRect(0, 0, item.WIDTH, item.HEIGHT)
+                item._reposition_ports()
+                item._update_handles()
+            if h > 0:
+                item.instance.height = h
+                item.HEIGHT = h
+                item.setRect(0, 0, item.WIDTH, item.HEIGHT)
+                item._reposition_ports()
+                item._update_handles()
+            self.blocks[b["id"]] = item
+            positions[b["id"]] = item
+            # Advance counter past any numeric suffix so new blocks don't clash.
+            parts = b["id"].rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                self._id_counter = max(self._id_counter, int(parts[1]) + 1)
+
+        # Restore connections.
+        for c in data.get("connections", []):
+            src_item = positions.get(c["src_block"])
+            dst_item = positions.get(c["dst_block"])
+            if src_item is None or dst_item is None:
+                continue
+            src_port = next(
+                (p for p in src_item.output_ports if p.port_name == c["src_port"]), None)
+            dst_port = next(
+                (p for p in dst_item.input_ports  if p.port_name == c["dst_port"]), None)
+            if src_port and dst_port:
+                self.add_connection(src_port, dst_port)
+
 
 class BlockView(QGraphicsView):
     def __init__(self, scene: BlockScene):
@@ -687,6 +2824,10 @@ class BlockView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setAcceptDrops(True)
+        # BoundingRectViewportUpdate ensures the full bounding rect (including
+        # child PortItems that overhang the parent block edge) is invalidated
+        # when a block moves — prevents ghost squares being left behind.
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -710,20 +2851,112 @@ class BlockView(QGraphicsView):
 # Palette dock (draggable list of block types)
 # ---------------------------------------------------------------------------
 
-class BlockPalette(QListWidget):
-    def __init__(self):
-        super().__init__()
-        self.setDragEnabled(True)
-        for spec in BLOCK_CATALOG.values():
-            item = QListWidgetItem(spec.display_name)
-            item.setData(Qt.UserRole, spec.type_name)
-            self.addItem(item)
+class _PaletteTree(QTreeWidget):
+    """QTreeWidget that exports the selected block's type_name as plain-text mime
+    so BlockView.dropEvent can identify which block to place."""
 
     def mimeData(self, items):
         md = super().mimeData(items)
         if items:
-            md.setText(items[0].data(Qt.UserRole))
+            type_name = items[0].data(0, Qt.UserRole)
+            if type_name:           # only leaf (block) items carry a type_name
+                md.setText(type_name)
         return md
+
+    def startDrag(self, supported_actions):
+        item = self.currentItem()
+        if item and item.data(0, Qt.UserRole):   # block leaf only — not a category header
+            super().startDrag(supported_actions)
+
+
+class BlockPalette(QWidget):
+    """Categorised, searchable, draggable block library panel."""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 4, 2, 2)
+        layout.setSpacing(3)
+
+        # -- search bar --
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search blocks…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setStyleSheet(
+            "QLineEdit { background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;"
+            "border-radius: 3px; padding: 3px 6px; }"
+        )
+        self._search.textChanged.connect(self._filter)
+        layout.addWidget(self._search)
+
+        # -- tree --
+        self._tree = _PaletteTree()
+        self._tree.setHeaderHidden(True)
+        self._tree.setDragEnabled(True)
+        self._tree.setDragDropMode(QTreeWidget.DragOnly)
+        self._tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self._tree.setIndentation(14)
+        self._tree.setAnimated(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget { background: #1a1a2e; border: none; color: #dcdcdc; }"
+            "QTreeWidget::item { padding: 3px 2px; }"
+            "QTreeWidget::item:selected { background: #1f4068; color: #ffffff; }"
+            "QTreeWidget::item:hover:!selected { background: #162447; }"
+            "QTreeWidget::branch { background: #1a1a2e; }"
+        )
+        layout.addWidget(self._tree)
+
+        self._cat_items: List[QTreeWidgetItem] = []
+        self._build_tree()
+
+    # ------------------------------------------------------------------
+    def _build_tree(self):
+        self._tree.clear()
+        self._cat_items = []
+
+        _cat_font = QFont("Segoe UI", 8, QFont.Bold)
+        _cat_fg   = QColor("#7ec8e3")
+
+        for cat_name, block_types in PALETTE_CATEGORIES:
+            cat_item = QTreeWidgetItem([cat_name])
+            cat_item.setFont(0, _cat_font)
+            cat_item.setForeground(0, _cat_fg)
+            cat_item.setExpanded(False)
+            self._tree.addTopLevelItem(cat_item)
+            self._cat_items.append(cat_item)
+
+            for type_name in block_types:
+                spec = BLOCK_CATALOG.get(type_name)
+                if spec is None:
+                    continue
+                block_item = QTreeWidgetItem([spec.display_name])
+                block_item.setData(0, Qt.UserRole, type_name)
+                block_item.setForeground(0, QColor(spec.color))
+                block_item.setToolTip(0, spec.description or spec.display_name)
+                cat_item.addChild(block_item)
+
+    # ------------------------------------------------------------------
+    def _filter(self, text: str):
+        query = text.strip().lower()
+
+        if not query:
+            for cat in self._cat_items:
+                cat.setHidden(False)
+                cat.setExpanded(False)
+                for i in range(cat.childCount()):
+                    cat.child(i).setHidden(False)
+            return
+
+        for cat in self._cat_items:
+            any_visible = False
+            for i in range(cat.childCount()):
+                child = cat.child(i)
+                match = query in child.text(0).lower()
+                child.setHidden(not match)
+                if match:
+                    any_visible = True
+            cat.setHidden(not any_visible)
+            cat.setExpanded(any_visible)
 
 
 # ---------------------------------------------------------------------------
@@ -732,22 +2965,119 @@ class BlockPalette(QListWidget):
 
 class ParamPanel(QWidget):
 
+    # Emitted when the user clicks an error row; carries the block_id.
+    error_block_selected = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self._block: Optional[BlockItem] = None
         self.layout_ = QVBoxLayout(self)
+        self.layout_.setSpacing(4)
+
         self.title = QLabel("<i>(no block selected)</i>")
         self.title.setTextFormat(Qt.RichText)
         self.layout_.addWidget(self.title)
+
         self.form_host = QWidget()
         self.form = QFormLayout(self.form_host)
         self.layout_.addWidget(self.form_host)
+
         self.help = QLabel("")
         self.help.setWordWrap(True)
         self.help.setStyleSheet("color: #888; font-size: 11px;")
         self.layout_.addWidget(self.help)
+
         self.layout_.addStretch(1)
         self._fields: Dict[str, QLineEdit] = {}
+        self._rate_spin: Optional[QSpinBox] = None
+
+        # ---- Error panel (shown only when there are validation errors) ----
+        self._error_frame = QFrame()
+        self._error_frame.setFrameShape(QFrame.StyledPanel)
+        self._error_frame.setStyleSheet(
+            "QFrame { background: #2d0a0a; border: 1px solid #aa2222;"
+            " border-radius: 4px; }"
+        )
+        _ef_layout = QVBoxLayout(self._error_frame)
+        _ef_layout.setContentsMargins(6, 6, 6, 6)
+        _ef_layout.setSpacing(4)
+
+        _err_hdr = QHBoxLayout()
+        _err_icon = QLabel("⚠")
+        _err_icon.setStyleSheet("color: #ff6b6b; font-size: 14px;")
+        _err_hdr.addWidget(_err_icon)
+        _err_title = QLabel("Simulation Errors")
+        _err_title.setStyleSheet(
+            "color: #ff6b6b; font-weight: bold; font-size: 12px;"
+        )
+        _err_hdr.addWidget(_err_title)
+        _err_hdr.addStretch()
+        self._err_count_label = QLabel("")
+        self._err_count_label.setStyleSheet("color: #ff9999; font-size: 11px;")
+        _err_hdr.addWidget(self._err_count_label)
+        _ef_layout.addLayout(_err_hdr)
+
+        self._error_list = QListWidget()
+        self._error_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none;"
+            " color: #ffaaaa; font-size: 11px; }"
+            "QListWidget::item { padding: 4px 2px; border-bottom: 1px solid #441111; }"
+            "QListWidget::item:selected { background: #551111; color: #ffdddd; }"
+            "QListWidget::item:hover { background: #3a0d0d; }"
+        )
+        self._error_list.setSelectionMode(QListWidget.SingleSelection)
+        self._error_list.setWordWrap(True)
+        self._error_list.itemClicked.connect(self._on_error_clicked)
+        self._error_list.setMaximumHeight(220)
+        _ef_layout.addWidget(self._error_list)
+
+        _hint = QLabel("Click an error to highlight the block")
+        _hint.setStyleSheet("color: #884444; font-size: 10px; font-style: italic;")
+        _ef_layout.addWidget(_hint)
+
+        self.layout_.addWidget(self._error_frame)
+        self._error_frame.setVisible(False)
+        self._error_block_ids: List[str] = []   # parallel to _error_list rows
+
+    # ------------------------------------------------------------------
+    # Error panel helpers
+    # ------------------------------------------------------------------
+
+    def show_errors(self, errors: List) -> None:
+        """Populate and reveal the error panel with the given ValidationErrors."""
+        self._error_list.clear()
+        self._error_block_ids.clear()
+        for err in errors:
+            # Two-line display: code + location on first line, message on second
+            text = f"{err.code}  {err.block_id} · {err.param}\n    {err.message}"
+            item = QListWidgetItem(text)
+            item.setToolTip(
+                f"Block : {err.block_id}  ({err.block_type})\n"
+                f"Param : {err.param}\n"
+                f"Code  : {err.code}\n"
+                f"Error : {err.message}"
+            )
+            self._error_list.addItem(item)
+            self._error_block_ids.append(err.block_id)
+        n = len(errors)
+        self._err_count_label.setText(f"{n} error{'s' if n != 1 else ''}")
+        self._error_frame.setVisible(True)
+
+    def clear_errors(self) -> None:
+        """Hide the error panel and remove all rows."""
+        self._error_list.clear()
+        self._error_block_ids.clear()
+        self._err_count_label.setText("")
+        self._error_frame.setVisible(False)
+
+    def _on_error_clicked(self, item: QListWidgetItem) -> None:
+        idx = self._error_list.row(item)
+        if 0 <= idx < len(self._error_block_ids):
+            self.error_block_selected.emit(self._error_block_ids[idx])
+
+    # ------------------------------------------------------------------
+    # Block parameter editing
+    # ------------------------------------------------------------------
 
     def set_block(self, block: Optional[BlockItem]) -> None:
         self._block = block
@@ -755,6 +3085,7 @@ class ParamPanel(QWidget):
         while self.form.rowCount():
             self.form.removeRow(0)
         self._fields.clear()
+        self._rate_spin = None
         if block is None:
             self.title.setText("<i>(no block selected)</i>")
             self.help.setText("")
@@ -763,16 +3094,55 @@ class ParamPanel(QWidget):
         self.title.setText(f"<b>{inst.spec.display_name}</b>  ({inst.block_id})")
         self.help.setText(inst.spec.description)
         for pname, (_default, helptxt) in inst.spec.params.items():
-            edit = QLineEdit(str(inst.params.get(pname, _default)))
-            edit.setToolTip(helptxt)
-            edit.editingFinished.connect(lambda name=pname, w=edit: self._on_edit(name, w))
-            self.form.addRow(pname, edit)
-            self._fields[pname] = edit
+            # PythonFcn code param gets a resizable multi-line editor
+            if inst.spec.type_name == "PythonFcn" and pname == "code":
+                te = QPlainTextEdit(str(inst.params.get(pname, _default)))
+                te.setToolTip(helptxt)
+                te.setMinimumHeight(100)
+                te.setMaximumHeight(220)
+                te.setLineWrapMode(QPlainTextEdit.NoWrap)
+                te.setStyleSheet(
+                    "QPlainTextEdit { font-family: Consolas, monospace; font-size: 12px;"
+                    " background: #1e1e1e; color: #d4d4d4; border: 1px solid #555; }"
+                )
+                te.textChanged.connect(
+                    lambda name=pname, w=te: self._on_edit_code(name, w)
+                )
+                self.form.addRow(pname, te)
+                self._fields[pname] = te  # type: ignore[assignment]
+            else:
+                edit = QLineEdit(str(inst.params.get(pname, _default)))
+                edit.setToolTip(helptxt)
+                edit.editingFinished.connect(lambda name=pname, w=edit: self._on_edit(name, w))
+                self.form.addRow(pname, edit)
+                self._fields[pname] = edit
+
+        # Rate spinner (FreeRTOS multi-rate)
+        self._rate_spin = QSpinBox()
+        self._rate_spin.setRange(0, 60000)
+        self._rate_spin.setSuffix(" ms  (0 = base)")
+        self._rate_spin.setToolTip(
+            "FreeRTOS only. 0 = base rate (step_ms).\n"
+            "Must be a positive integer multiple of step_ms."
+        )
+        self._rate_spin.setValue(inst.sample_time_ms)
+        self._rate_spin.valueChanged.connect(self._on_rate_changed)
+        self.form.addRow("Rate (ms)", self._rate_spin)
+
+    def _on_rate_changed(self, value: int) -> None:
+        if self._block is not None:
+            self._block.instance.sample_time_ms = value
 
     def _on_edit(self, name: str, widget: QLineEdit) -> None:
         if self._block is None:
             return
         self._block.instance.params[name] = widget.text()
+
+    def _on_edit_code(self, name: str, widget: "QPlainTextEdit") -> None:
+        """Slot for multi-line code editors (PythonFcn)."""
+        if self._block is None:
+            return
+        self._block.instance.params[name] = widget.toPlainText()
 
 
 # ---------------------------------------------------------------------------
@@ -1049,144 +3419,2067 @@ class SimScopeTab(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Parameter validation
+# ---------------------------------------------------------------------------
+
+# STM32 pin pattern: P followed by a letter A-H and 1–2 digits (e.g. PA5, PC13)
+_PIN_RE = re.compile(r"^P[A-H]\d{1,2}$", re.IGNORECASE)
+
+
+def _try_eval_param(s: str, workspace=None) -> Optional[float]:
+    """Try to resolve parameter string *s* to a float.
+
+    Accepts numeric literals and workspace variable references.
+    Returns None if resolution fails.
+    """
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        pass
+    if workspace is not None:
+        try:
+            v = workspace.eval_param(str(s))
+            return float(v)
+        except Exception:
+            pass
+    return None
+
+
+def _is_valid_stm32_pin(pin: str) -> bool:
+    return bool(_PIN_RE.match(pin.strip()))
+
+
+def _validate_block(b: dict, workspace=None) -> List[ValidationError]:
+    """Return a list of ValidationErrors for a single block dict."""
+    errors: List[ValidationError] = []
+    btype = b["type"]
+    bid   = b["id"]
+    p     = b.get("params", {})
+
+    def _num(param: str, default: str = "0.0") -> Optional[float]:
+        return _try_eval_param(p.get(param, default), workspace)
+
+    def _bad(param: str, code: str, msg: str) -> None:
+        errors.append(ValidationError(bid, btype, param, code, msg))
+
+    # ---- SquareWave -------------------------------------------------------
+    if btype == "SquareWave":
+        f = _num("frequency_hz", "1.0")
+        if f is None:          _bad("frequency_hz", "E001", "Must be a valid number or workspace expression")
+        elif f <= 0:           _bad("frequency_hz", "E002", "Frequency must be > 0 Hz")
+        if _num("amplitude", "1.0") is None:
+                               _bad("amplitude",    "E001", "Must be a valid number")
+        d = _num("duty", "0.5")
+        if d is None:          _bad("duty",         "E001", "Must be a valid number")
+        elif not 0.0 <= d <= 1.0:
+                               _bad("duty",         "E002", "Duty cycle must be in range [0, 1]")
+        if _num("offset", "0.0") is None:
+                               _bad("offset",       "E001", "Must be a valid number")
+
+    # ---- GpioIn -----------------------------------------------------------
+    elif btype == "GpioIn":
+        pin = p.get("pin", "").strip()
+        if not _is_valid_stm32_pin(pin):
+            _bad("pin", "E004", f"'{pin}' is not a valid STM32 pin (e.g. PC13, PA5)")
+        pull = p.get("pull", "none").strip().lower()
+        if pull not in ("none", "up", "down"):
+            _bad("pull", "E003", "Must be 'none', 'up', or 'down'")
+        al = _num("active_low", "1")
+        if al is None or int(al) not in (0, 1):
+            _bad("active_low", "E002", "Must be 0 or 1")
+
+    # ---- GpioOut ----------------------------------------------------------
+    elif btype == "GpioOut":
+        pin = p.get("pin", "").strip()
+        if not _is_valid_stm32_pin(pin):
+            _bad("pin", "E004", f"'{pin}' is not a valid STM32 pin (e.g. PA5)")
+        if _num("threshold", "0.5") is None:
+            _bad("threshold", "E001", "Must be a valid number")
+
+    # ---- Scope ------------------------------------------------------------
+    elif btype == "Scope":
+        mp = _num("max_points", "500")
+        if mp is None or mp < 1 or mp % 1 != 0:
+            _bad("max_points", "E002", "Must be a positive integer")
+        s = _num("stream", "1")
+        if s is None or int(s) not in (0, 1):
+            _bad("stream", "E002", "Must be 0 or 1")
+
+    # ---- Ultrasonic -------------------------------------------------------
+    elif btype == "Ultrasonic":
+        trig = p.get("trig_pin", "").strip()
+        echo = p.get("echo_pin", "").strip()
+        if not _is_valid_stm32_pin(trig):
+            _bad("trig_pin", "E004", f"'{trig}' is not a valid STM32 pin")
+        if not _is_valid_stm32_pin(echo):
+            _bad("echo_pin", "E004", f"'{echo}' is not a valid STM32 pin")
+        if (_is_valid_stm32_pin(trig) and _is_valid_stm32_pin(echo)
+                and trig.upper() == echo.upper()):
+            _bad("echo_pin", "E003", "TRIG and ECHO pins must be different")
+        pm = _num("period_ms", "60")
+        if pm is None:     _bad("period_ms",  "E001", "Must be a valid number")
+        elif pm < 50:      _bad("period_ms",  "E002", "Must be >= 50 ms (HC-SR04 minimum)")
+        tu = _num("timeout_us", "30000")
+        if tu is None:     _bad("timeout_us", "E001", "Must be a valid number")
+        elif tu <= 0:      _bad("timeout_us", "E002", "Must be > 0 us")
+
+    # ---- Constant ---------------------------------------------------------
+    elif btype == "Constant":
+        if _num("value", "1.0") is None:
+            _bad("value", "E001", "Must be a valid number or workspace expression")
+
+    # ---- Sum / Product — no params to validate ----------------------------
+    elif btype in ("Sum", "Product"):
+        pass
+
+    # ---- Step -------------------------------------------------------------
+    elif btype == "Step":
+        st = _num("step_time", "1.0")
+        if st is None:   _bad("step_time",     "E001", "Must be a valid number")
+        elif st < 0:     _bad("step_time",     "E002", "Step time must be >= 0")
+        if _num("initial_value", "0.0") is None:
+                         _bad("initial_value", "E001", "Must be a valid number")
+        if _num("final_value", "1.0") is None:
+                         _bad("final_value",   "E001", "Must be a valid number")
+
+    # ---- Integrator -------------------------------------------------------
+    elif btype == "Integrator":
+        if _num("initial_value", "0.0") is None:
+            _bad("initial_value", "E001", "Must be a valid number")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+
+    # ---- TransferFcn ------------------------------------------------------
+    elif btype == "TransferFcn":
+        num_str = p.get("numerator",   "1")
+        den_str = p.get("denominator", "1 1")
+        num_c: List[float] = []
+        den_c: List[float] = []
+        try:
+            num_c = [float(x) for x in num_str.split()]
+            if not num_c:
+                _bad("numerator", "E001", "Must contain at least one coefficient")
+        except ValueError:
+            _bad("numerator", "E001",
+                 "Coefficients must be space-separated numbers (e.g. '1 2 1')")
+        try:
+            den_c = [float(x) for x in den_str.split()]
+            if not den_c:
+                _bad("denominator", "E001", "Must contain at least one coefficient")
+            elif den_c[0] == 0.0:
+                _bad("denominator", "E001",
+                     "Leading denominator coefficient must be non-zero")
+        except ValueError:
+            _bad("denominator", "E001",
+                 "Coefficients must be space-separated numbers (e.g. '1 2 1')")
+        if num_c and den_c and len(num_c) > len(den_c):
+            _bad("numerator", "E006",
+                 f"Improper transfer function: numerator order {len(num_c)-1} "
+                 f"> denominator order {len(den_c)-1}")
+
+    # ---- PID --------------------------------------------------------------
+    elif btype == "PID":
+        for pname in ("Kp", "Ki", "Kd"):
+            if _num(pname, "0.0") is None:
+                _bad(pname, "E001", f"{pname} must be a valid number")
+        n = _num("N", "100.0")
+        if n is None:    _bad("N", "E001", "Must be a valid number")
+        elif n <= 0:     _bad("N", "E002", "Derivative filter bandwidth N must be > 0")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007",
+                 "upper_limit must be strictly greater than lower_limit")
+
+    # ---- ToWorkspace ------------------------------------------------------
+    elif btype == "ToWorkspace":
+        vn = p.get("variable_name", "yout").strip()
+        if not vn:
+            _bad("variable_name", "E003", "Variable name cannot be empty")
+        elif not vn.isidentifier():
+            _bad("variable_name", "E005",
+                 f"'{vn}' is not a valid Python identifier")
+        mp = _num("max_points", "10000")
+        if mp is None or mp < 1:
+            _bad("max_points", "E002", "Must be a positive integer >= 1")
+        dc = _num("decimation", "1")
+        if dc is None or dc < 1:
+            _bad("decimation", "E002", "Must be a positive integer >= 1")
+        st = _num("save_time", "1")
+        if st is None or int(st) not in (0, 1):
+            _bad("save_time", "E002", "Must be 0 or 1")
+
+    # ---- SineWave ---------------------------------------------------------
+    elif btype == "SineWave":
+        f = _num("frequency_hz", "1.0")
+        if f is None:    _bad("frequency_hz", "E001", "Must be a valid number or workspace expression")
+        elif f <= 0:     _bad("frequency_hz", "E002", "Frequency must be > 0 Hz")
+        if _num("amplitude", "1.0") is None:
+                         _bad("amplitude",    "E001", "Must be a valid number")
+        if _num("phase_deg", "0.0") is None:
+                         _bad("phase_deg",    "E001", "Must be a valid number")
+        if _num("offset", "0.0") is None:
+                         _bad("offset",       "E001", "Must be a valid number")
+
+    # ---- Ramp -------------------------------------------------------------
+    elif btype == "Ramp":
+        if _num("slope", "1.0") is None:
+            _bad("slope",          "E001", "Must be a valid number")
+        st = _num("start_time", "0.0")
+        if st is None:   _bad("start_time",     "E001", "Must be a valid number")
+        elif st < 0:     _bad("start_time",     "E002", "start_time must be >= 0")
+        if _num("initial_output", "0.0") is None:
+            _bad("initial_output", "E001", "Must be a valid number")
+
+    # ---- Clock ------------------------------------------------------------
+    elif btype == "Clock":
+        pass  # no params to validate
+
+    # ---- PulseGenerator ---------------------------------------------------
+    elif btype == "PulseGenerator":
+        if _num("amplitude", "1.0") is None:
+            _bad("amplitude",   "E001", "Must be a valid number")
+        per = _num("period", "1.0")
+        if per is None:  _bad("period",      "E001", "Must be a valid number")
+        elif per <= 0:   _bad("period",      "E002", "Period must be > 0")
+        pw = _num("pulse_width", "50")
+        if pw is None:   _bad("pulse_width", "E001", "Must be a valid number")
+        elif not (0.0 <= pw <= 100.0):
+                         _bad("pulse_width", "E002", "pulse_width must be in [0, 100]")
+        if _num("phase_delay", "0.0") is None:
+            _bad("phase_delay", "E001", "Must be a valid number")
+
+    # ---- Gain -------------------------------------------------------------
+    elif btype == "Gain":
+        if _num("gain", "1.0") is None:
+            _bad("gain", "E001", "Must be a valid number")
+
+    # ---- Abs --------------------------------------------------------------
+    elif btype == "Abs":
+        pass  # no params
+
+    # ---- Sign -------------------------------------------------------------
+    elif btype == "Sign":
+        pass  # no params
+
+    # ---- Sqrt -------------------------------------------------------------
+    elif btype == "Sqrt":
+        mode = p.get("mode", "sqrt").strip().lower()
+        if mode not in ("sqrt", "signed_sqrt"):
+            _bad("mode", "E003", "mode must be 'sqrt' or 'signed_sqrt'")
+
+    # ---- Saturation -------------------------------------------------------
+    elif btype == "Saturation":
+        ul = _num("upper_limit",  "1.0")
+        ll = _num("lower_limit", "-1.0")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+
+    # ---- DeadZone ---------------------------------------------------------
+    elif btype == "DeadZone":
+        uv = _num("upper_value",  "0.5")
+        lv = _num("lower_value", "-0.5")
+        if uv is None:   _bad("upper_value", "E001", "Must be a valid number")
+        if lv is None:   _bad("lower_value", "E001", "Must be a valid number")
+        if uv is not None and lv is not None and uv < lv:
+            _bad("upper_value", "E007", "upper_value must be >= lower_value")
+
+    # ---- MinMax -----------------------------------------------------------
+    elif btype == "MinMax":
+        fn = p.get("function", "min").strip().lower()
+        if fn not in ("min", "max"):
+            _bad("function", "E003", "function must be 'min' or 'max'")
+
+    # ---- RelationalOperator -----------------------------------------------
+    elif btype == "RelationalOperator":
+        op = p.get("operator", ">").strip()
+        if op not in (">", "<", ">=", "<=", "==", "!="):
+            _bad("operator", "E003", "operator must be one of: >, <, >=, <=, ==, !=")
+
+    # ---- LogicalOperator --------------------------------------------------
+    elif btype == "LogicalOperator":
+        op = p.get("operator", "AND").strip().upper()
+        if op not in ("AND", "OR", "NOT", "NAND", "NOR", "XOR"):
+            _bad("operator", "E003", "operator must be one of: AND, OR, NOT, NAND, NOR, XOR")
+
+    # ---- Switch -----------------------------------------------------------
+    elif btype == "Switch":
+        if _num("threshold", "0.5") is None:
+            _bad("threshold", "E001", "Must be a valid number")
+        crit = p.get("criteria", ">=").strip()
+        if crit not in (">", ">=", "=="):
+            _bad("criteria", "E003", "criteria must be one of: >, >=, ==")
+
+    # ---- UnitDelay --------------------------------------------------------
+    elif btype == "UnitDelay":
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- DiscreteIntegrator -----------------------------------------------
+    elif btype == "DiscreteIntegrator":
+        if _num("gain_value", "1.0") is None:
+            _bad("gain_value",        "E001", "Must be a valid number")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:   _bad("upper_limit", "E001", "Must be a valid number")
+        if ll is None:   _bad("lower_limit", "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+        meth = p.get("method", "Forward Euler").strip()
+        valid_methods = ("Forward Euler", "Backward Euler", "Trapezoidal")
+        if meth not in valid_methods:
+            _bad("method", "E003", f"method must be one of: {', '.join(valid_methods)}")
+
+    # ---- ZeroOrderHold ----------------------------------------------------
+    elif btype == "ZeroOrderHold":
+        st = _num("sample_time", "0.01")
+        if st is None:   _bad("sample_time", "E001", "Must be a valid number")
+        elif st <= 0:    _bad("sample_time", "E002", "sample_time must be > 0")
+
+    # ---- Derivative -------------------------------------------------------
+    elif btype == "Derivative":
+        ic = _num("initial_condition", "0.0")
+        if ic is None or (isinstance(ic, float) and (math.isnan(ic) or math.isinf(ic))):
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- Lookup1D ---------------------------------------------------------
+    elif btype == "Lookup1D":
+        bp_str  = p.get("breakpoints", "0 1")
+        tbl_str = p.get("table_data",  "0 1")
+        bp_vals: List[float] = []
+        tbl_vals: List[float] = []
+        try:
+            bp_vals = [float(x) for x in bp_str.split()]
+            if not bp_vals:
+                _bad("breakpoints", "E001", "Must contain at least one value")
+        except ValueError:
+            _bad("breakpoints", "E001", "Must be space-separated numbers")
+        try:
+            tbl_vals = [float(x) for x in tbl_str.split()]
+            if not tbl_vals:
+                _bad("table_data", "E001", "Must contain at least one value")
+        except ValueError:
+            _bad("table_data", "E001", "Must be space-separated numbers")
+        if bp_vals and tbl_vals and len(bp_vals) != len(tbl_vals):
+            _bad("table_data", "E007",
+                 f"breakpoints ({len(bp_vals)}) and table_data ({len(tbl_vals)}) must have same length")
+        if len(bp_vals) >= 2:
+            for i in range(len(bp_vals) - 1):
+                if bp_vals[i] >= bp_vals[i+1]:
+                    _bad("breakpoints", "E002", "breakpoints must be strictly increasing")
+                    break
+        extrap = p.get("extrapolation", "clip").strip().lower()
+        if extrap not in ("clip", "linear"):
+            _bad("extrapolation", "E003", "extrapolation must be 'clip' or 'linear'")
+
+    # ---- ADC --------------------------------------------------------------
+    elif btype == "ADC":
+        ch = _num("channel", "1")
+        if ch is None or not (1 <= int(ch) <= 16):
+            _bad("channel", "E002", "channel must be an integer in [1, 16]")
+        res = _num("resolution", "12")
+        if res is None or int(res) not in (6, 8, 10, 12):
+            _bad("resolution", "E002", "resolution must be 6, 8, 10, or 12")
+        vr = _num("vref", "3.3")
+        if vr is None:   _bad("vref",      "E001", "Must be a valid number")
+        elif vr <= 0:    _bad("vref",      "E002", "vref must be > 0")
+        if _num("sim_value", "0.0") is None:
+            _bad("sim_value", "E001", "Must be a valid number")
+
+    # ---- DAC --------------------------------------------------------------
+    elif btype == "DAC":
+        ch = _num("channel", "1")
+        if ch is None or int(ch) not in (1, 2):
+            _bad("channel", "E002", "channel must be 1 or 2")
+        vr = _num("vref", "3.3")
+        if vr is None:   _bad("vref", "E001", "Must be a valid number")
+        elif vr <= 0:    _bad("vref", "E002", "vref must be > 0")
+
+    # ---- PWMOut -----------------------------------------------------------
+    elif btype == "PWMOut":
+        timer = p.get("timer", "").strip()
+        if not timer:
+            _bad("timer", "E003", "timer name cannot be empty (e.g. TIM2)")
+        ch = _num("channel", "1")
+        if ch is None or int(ch) not in (1, 2, 3, 4):
+            _bad("channel", "E002", "channel must be 1, 2, 3, or 4")
+        fhz = _num("frequency_hz", "1000")
+        if fhz is None:  _bad("frequency_hz", "E001", "Must be a valid number")
+        elif fhz <= 0:   _bad("frequency_hz", "E002", "frequency_hz must be > 0")
+        md = _num("max_duty", "100.0")
+        if md is None:   _bad("max_duty", "E001", "Must be a valid number")
+        elif md <= 0:    _bad("max_duty", "E002", "max_duty must be > 0")
+
+    # ---- TimerTick --------------------------------------------------------
+    elif btype == "TimerTick":
+        sc = _num("scale", "0.001")
+        if sc is None:   _bad("scale", "E001", "Must be a valid number")
+        elif sc == 0:    _bad("scale", "E002", "scale must be != 0")
+
+    # ---- StateSpace ----------------------------------------------------------
+    elif btype == "StateSpace":
+        for pname in ("A", "B", "C"):
+            pstr = p.get(pname, "")
+            if not pstr.strip():
+                _bad(pname, "E001", f"Matrix {pname} cannot be empty")
+                continue
+            try:
+                rows = [r.strip() for r in pstr.split(";") if r.strip()]
+                for row in rows:
+                    [float(v) for v in row.split()]
+            except ValueError:
+                _bad(pname, "E001",
+                     f"Matrix {pname}: all values must be numbers (rows by ';', cols by spaces)")
+        if _num("D", "0") is None:
+            _bad("D", "E001", "D must be a valid number")
+        method = p.get("method", "euler").strip().lower()
+        if method not in ("euler", "zoh"):
+            _bad("method", "E003", "method must be 'euler' or 'zoh'")
+        ic_str = p.get("initial_state", "").strip()
+        if ic_str:
+            try:
+                [float(v) for v in ic_str.split()]
+            except ValueError:
+                _bad("initial_state", "E001",
+                     "initial_state must be space-separated numbers")
+
+    # ---- DiscreteStateSpace -------------------------------------------------
+    elif btype == "DiscreteStateSpace":
+        for pname in ("Ad", "Bd", "Cd"):
+            pstr = p.get(pname, "")
+            if not pstr.strip():
+                _bad(pname, "E001", f"Matrix {pname} cannot be empty")
+                continue
+            try:
+                rows = [r.strip() for r in pstr.split(";") if r.strip()]
+                for row in rows:
+                    [float(v) for v in row.split()]
+            except ValueError:
+                _bad(pname, "E001",
+                     f"Matrix {pname}: all values must be numbers (rows by ';', cols by spaces)")
+        if _num("Dd", "0") is None:
+            _bad("Dd", "E001", "Dd must be a valid number")
+        ic_str = p.get("initial_state", "").strip()
+        if ic_str:
+            try:
+                [float(v) for v in ic_str.split()]
+            except ValueError:
+                _bad("initial_state", "E001",
+                     "initial_state must be space-separated numbers")
+
+    # ---- ZeroPoleGain -------------------------------------------------------
+    elif btype == "ZeroPoleGain":
+        zeros_str = p.get("zeros", "").strip()
+        if zeros_str:
+            try:
+                [float(v) for v in zeros_str.split()]
+            except ValueError:
+                _bad("zeros", "E001",
+                     "zeros must be space-separated real numbers (e.g. '-1 -2')")
+        poles_str = p.get("poles", "-1").strip()
+        if not poles_str:
+            _bad("poles", "E001", "poles cannot be empty; enter at least one pole")
+        else:
+            try:
+                pvals = [float(v) for v in poles_str.split()]
+                if len(pvals) == 0:
+                    _bad("poles", "E001", "Enter at least one pole")
+            except ValueError:
+                _bad("poles", "E001",
+                     "poles must be space-separated real numbers (e.g. '-1 -2')")
+        g = _num("gain", "1.0")
+        if g is None:
+            _bad("gain", "E001", "gain must be a valid number")
+        elif g == 0.0:
+            _bad("gain", "E002", "gain must not be zero")
+
+    # ---- Chirp --------------------------------------------------------------
+    elif btype == "Chirp":
+        for pname in ("amplitude", "f_start", "f_end", "sweep_time", "phase_deg"):
+            if _num(pname, "1.0") is None:
+                _bad(pname, "E001", "Must be a valid number")
+        f0 = _num("f_start", "1.0")
+        f1 = _num("f_end", "10.0")
+        ts = _num("sweep_time", "5.0")
+        if f0 is not None and f0 <= 0: _bad("f_start", "E002", "f_start must be > 0 Hz")
+        if f1 is not None and f1 <= 0: _bad("f_end",   "E002", "f_end must be > 0 Hz")
+        if ts is not None and ts <= 0: _bad("sweep_time", "E002", "sweep_time must be > 0 s")
+
+    # ---- RandomNumber -------------------------------------------------------
+    elif btype == "RandomNumber":
+        if _num("mean", "0.0") is None: _bad("mean", "E001", "Must be a valid number")
+        v = _num("variance", "1.0")
+        if v is None:  _bad("variance", "E001", "Must be a valid number")
+        elif v <= 0:   _bad("variance", "E002", "variance must be > 0")
+        s = _num("seed", "-1")
+        if s is None:  _bad("seed", "E001", "seed must be an integer or -1")
+
+    # ---- FromWorkspace ------------------------------------------------------
+    elif btype == "FromWorkspace":
+        vn = p.get("variable_name", "u").strip()
+        if not vn: _bad("variable_name", "E001", "Variable name cannot be empty")
+        elif not vn.isidentifier(): _bad("variable_name", "E005", f"'{vn}' is not a valid Python identifier")
+        if _num("default", "0.0") is None: _bad("default", "E001", "default must be a valid number")
+
+    # ---- MathFunction -------------------------------------------------------
+    elif btype == "MathFunction":
+        fn = p.get("function", "exp").strip().lower()
+        allowed = ("exp", "log", "log10", "square", "reciprocal", "pow10", "pow2")
+        if fn not in allowed:
+            _bad("function", "E003", f"function must be one of: {', '.join(allowed)}")
+
+    # ---- RoundingFunction ---------------------------------------------------
+    elif btype == "RoundingFunction":
+        fn = p.get("function", "round").strip().lower()
+        if fn not in ("floor", "ceil", "round", "fix"):
+            _bad("function", "E003", "function must be: floor, ceil, round, or fix")
+
+    # ---- Divide -------------------------------------------------------------
+    elif btype == "Divide":
+        e = _num("eps", "1e-10")
+        if e is None: _bad("eps", "E001", "eps must be a valid number")
+        elif e <= 0:  _bad("eps", "E002", "eps must be > 0")
+
+    # ---- Bias ---------------------------------------------------------------
+    elif btype == "Bias":
+        if _num("bias", "0.0") is None: _bad("bias", "E001", "Must be a valid number")
+
+    # ---- Polynomial ---------------------------------------------------------
+    elif btype == "Polynomial":
+        c_str = p.get("coefficients", "1 0").strip()
+        if not c_str: _bad("coefficients", "E001", "Must have at least one coefficient")
+        else:
+            try: [float(x) for x in c_str.split()]
+            except ValueError: _bad("coefficients", "E001", "All coefficients must be valid numbers")
+
+    # ---- RateLimiter --------------------------------------------------------
+    elif btype == "RateLimiter":
+        rl = _num("rising_limit",  "1.0")
+        fl = _num("falling_limit", "-1.0")
+        if rl is None: _bad("rising_limit",  "E001", "Must be a valid number")
+        elif rl <= 0:  _bad("rising_limit",  "E002", "rising_limit must be > 0")
+        if fl is None: _bad("falling_limit", "E001", "Must be a valid number")
+        elif fl >= 0:  _bad("falling_limit", "E002", "falling_limit must be < 0")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- Quantizer ----------------------------------------------------------
+    elif btype == "Quantizer":
+        q = _num("interval", "0.1")
+        if q is None: _bad("interval", "E001", "Must be a valid number")
+        elif q <= 0:  _bad("interval", "E002", "interval must be > 0")
+
+    # ---- DiscreteTransferFcn ------------------------------------------------
+    elif btype == "DiscreteTransferFcn":
+        num_str = p.get("numerator",   "1")
+        den_str = p.get("denominator", "1 -1")
+        num_c: List[float] = []
+        den_c: List[float] = []
+        try:
+            num_c = [float(x) for x in num_str.split()]
+            if not num_c:
+                _bad("numerator", "E001", "Must contain at least one coefficient")
+        except ValueError:
+            _bad("numerator", "E001", "Coefficients must be space-separated numbers")
+        try:
+            den_c = [float(x) for x in den_str.split()]
+            if not den_c:
+                _bad("denominator", "E001", "Must contain at least one coefficient")
+            elif den_c[0] == 0.0:
+                _bad("denominator", "E001", "Leading denominator coefficient must be non-zero")
+        except ValueError:
+            _bad("denominator", "E001", "Coefficients must be space-separated numbers")
+        if num_c and den_c and len(num_c) > len(den_c):
+            _bad("numerator", "E006",
+                 f"Improper transfer function: numerator order {len(num_c)-1} "
+                 f"> denominator order {len(den_c)-1}")
+
+    # ---- MovingAverage ------------------------------------------------------
+    elif btype == "MovingAverage":
+        w = _num("window", "10")
+        if w is None or int(w) < 1: _bad("window", "E002", "window must be >= 1")
+
+    # ---- Lookup2D -----------------------------------------------------------
+    elif btype == "Lookup2D":
+        for pname in ("row_breakpoints", "col_breakpoints"):
+            s = p.get(pname, "")
+            try:
+                vals = [float(x) for x in s.split()]
+                if len(vals) < 2: _bad(pname, "E002", "Need at least 2 breakpoints")
+                elif any(vals[i] >= vals[i+1] for i in range(len(vals)-1)):
+                    _bad(pname, "E002", "Breakpoints must be strictly increasing")
+            except ValueError:
+                _bad(pname, "E001", "Breakpoints must be space-separated numbers")
+        try:
+            rbp = [float(x) for x in p.get("row_breakpoints", "0 1").split()]
+            cbp = [float(x) for x in p.get("col_breakpoints", "0 1").split()]
+            rows = [[float(v) for v in row.split()] for row in p.get("table", "0 1; 1 2").split(";") if row.strip()]
+            if len(rows) != len(rbp):
+                _bad("table", "E002", f"Table has {len(rows)} rows but row_breakpoints has {len(rbp)} points")
+            elif any(len(r) != len(cbp) for r in rows):
+                _bad("table", "E002", f"Each table row must have {len(cbp)} columns (matching col_breakpoints)")
+        except ValueError:
+            _bad("table", "E001", "Table values must be numbers; rows separated by ';'")
+
+    # ---- EncoderRead --------------------------------------------------------
+    elif btype == "EncoderRead":
+        t_str = p.get("timer", "").strip()
+        if not t_str: _bad("timer", "E003", "timer cannot be empty (e.g. TIM4)")
+        cpr = _num("counts_per_rev", "1000")
+        if cpr is None: _bad("counts_per_rev", "E001", "Must be a valid number")
+        elif cpr <= 0:  _bad("counts_per_rev", "E002", "counts_per_rev must be > 0")
+        mode = p.get("mode", "position").strip().lower()
+        if mode not in ("position", "velocity"): _bad("mode", "E003", "mode must be 'position' or 'velocity'")
+        if _num("sim_value", "0.0") is None: _bad("sim_value", "E001", "Must be a valid number")
+
+    # ---- Ground -------------------------------------------------------------
+    elif btype == "Ground":
+        pass
+
+    # ---- Relay --------------------------------------------------------------
+    elif btype == "Relay":
+        on_t  = _num("on_threshold",  "0.5")
+        off_t = _num("off_threshold", "-0.5")
+        if on_t  is None: _bad("on_threshold",  "E001", "Must be a valid number")
+        if off_t is None: _bad("off_threshold", "E001", "Must be a valid number")
+        if on_t is not None and off_t is not None and off_t >= on_t:
+            _bad("off_threshold", "E007", "off_threshold must be strictly less than on_threshold")
+        if _num("on_value",  "1.0") is None: _bad("on_value",  "E001", "Must be a valid number")
+        if _num("off_value", "0.0") is None: _bad("off_value", "E001", "Must be a valid number")
+
+    # ---- CompareToConstant --------------------------------------------------
+    elif btype == "CompareToConstant":
+        op = p.get("operator", "==").strip()
+        if op not in ("==", "!=", "<", ">", "<=", ">="):
+            _bad("operator", "E003", "operator must be one of: ==, !=, <, >, <=, >=")
+        if _num("constant", "0.0") is None:
+            _bad("constant", "E001", "Must be a valid number")
+
+    # ---- DetectRisePositive -------------------------------------------------
+    elif btype == "DetectRisePositive":
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- SaturationDynamic --------------------------------------------------
+    elif btype == "SaturationDynamic":
+        if _num("default_upper",  "1.0") is None: _bad("default_upper",  "E001", "Must be a valid number")
+        if _num("default_lower", "-1.0") is None: _bad("default_lower", "E001", "Must be a valid number")
+        ul = _num("default_upper",  "1.0")
+        ll = _num("default_lower", "-1.0")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("default_upper", "E007", "default_upper must be greater than default_lower")
+
+    # ---- MultiportSwitch ----------------------------------------------------
+    elif btype == "MultiportSwitch":
+        ni = _num("num_inputs", "4")
+        if ni is None: _bad("num_inputs", "E001", "Must be a valid integer")
+        elif int(ni) < 2 or int(ni) > 4: _bad("num_inputs", "E002", "num_inputs must be 2, 3, or 4")
+
+    # ---- TransportDelay -----------------------------------------------------
+    elif btype == "TransportDelay":
+        ds = _num("delay_samples", "10")
+        if ds is None:       _bad("delay_samples", "E001", "Must be a valid integer")
+        elif int(ds) < 1:    _bad("delay_samples", "E002", "delay_samples must be >= 1")
+        if _num("initial_condition", "0.0") is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+
+    # ---- UARTSend -----------------------------------------------------------
+    elif btype == "UARTSend":
+        usart = p.get("usart", "").strip()
+        if not usart: _bad("usart", "E003", "usart cannot be empty (e.g. USART1)")
+        fmt = p.get("format", "%.4f\r\n").strip()
+        if not fmt: _bad("format", "E003", "format string cannot be empty")
+        to = _num("timeout", "10")
+        if to is None: _bad("timeout", "E001", "Must be a valid number")
+        elif to <= 0:  _bad("timeout", "E002", "timeout must be > 0 ms")
+
+    # ---- I2CRead ------------------------------------------------------------
+    elif btype == "I2CRead":
+        i2c = p.get("i2c", "").strip()
+        if not i2c: _bad("i2c", "E003", "i2c cannot be empty (e.g. I2C1)")
+        dev = p.get("device_addr", "0x48").strip()
+        try: int(dev, 0)
+        except ValueError: _bad("device_addr", "E001", "Must be a valid hex or decimal address (e.g. 0x48)")
+        reg = p.get("reg_addr", "0x00").strip()
+        try: int(reg, 0)
+        except ValueError: _bad("reg_addr", "E001", "Must be a valid hex or decimal address (e.g. 0x00)")
+        db = _num("data_bytes", "2")
+        if db is None or int(db) not in (1, 2): _bad("data_bytes", "E002", "data_bytes must be 1 or 2")
+        if _num("scale", "1.0") is None: _bad("scale", "E001", "Must be a valid number")
+        if _num("sim_value", "0.0") is None: _bad("sim_value", "E001", "Must be a valid number")
+
+    # ---- I2CWrite -----------------------------------------------------------
+    elif btype == "I2CWrite":
+        i2c = p.get("i2c", "").strip()
+        if not i2c: _bad("i2c", "E003", "i2c cannot be empty (e.g. I2C1)")
+        dev = p.get("device_addr", "0x48").strip()
+        try: int(dev, 0)
+        except ValueError: _bad("device_addr", "E001", "Must be a valid hex or decimal address")
+        reg = p.get("reg_addr", "0x00").strip()
+        try: int(reg, 0)
+        except ValueError: _bad("reg_addr", "E001", "Must be a valid hex or decimal address")
+        db = _num("data_bytes", "2")
+        if db is None or int(db) not in (1, 2): _bad("data_bytes", "E002", "data_bytes must be 1 or 2")
+        if _num("scale", "1.0") is None: _bad("scale", "E001", "Must be a valid number")
+
+    # ---- FIRFilter ----------------------------------------------------------
+    elif btype == "FIRFilter":
+        c_str = p.get("coefficients", "").strip()
+        if not c_str:
+            _bad("coefficients", "E001", "Must have at least one coefficient")
+        else:
+            try:
+                coeffs = [float(x) for x in c_str.split()]
+                if len(coeffs) == 0:
+                    _bad("coefficients", "E001", "Must have at least one coefficient")
+            except ValueError:
+                _bad("coefficients", "E001",
+                     "All tap weights must be valid numbers (space-separated)")
+
+    # ---- BiquadFilter -------------------------------------------------------
+    elif btype == "BiquadFilter":
+        for pname in ("b0", "b1", "b2", "a1", "a2"):
+            if _num(pname, "0.0") is None:
+                _bad(pname, "E001", f"{pname} must be a valid number")
+
+    # ---- RunningRMS ---------------------------------------------------------
+    elif btype == "RunningRMS":
+        w = _num("window", "100")
+        if w is None:       _bad("window", "E001", "Must be a valid integer")
+        elif int(w) < 1:    _bad("window", "E002", "window must be >= 1")
+
+    # ---- MedianFilter -------------------------------------------------------
+    elif btype == "MedianFilter":
+        w = _num("window", "5")
+        if w is None:        _bad("window", "E001", "Must be a valid integer")
+        elif int(w) < 1:     _bad("window", "E002", "window must be >= 1")
+        elif int(w) > 15:    _bad("window", "E002", "window must be <= 15 for embedded C codegen")
+
+    # ---- NCO ----------------------------------------------------------------
+    elif btype == "NCO":
+        if _num("amplitude",     "1.0") is None: _bad("amplitude",     "E001", "Must be a valid number")
+        if _num("initial_phase", "0.0") is None: _bad("initial_phase", "E001", "Must be a valid number")
+
+    # ---- PeakDetector -------------------------------------------------------
+    elif btype == "PeakDetector":
+        mode = p.get("mode", "max").strip().lower()
+        if mode not in ("max", "abs_max"):
+            _bad("mode", "E003", "mode must be 'max' or 'abs_max'")
+        dr = _num("decay_rate", "0.0")
+        if dr is None:  _bad("decay_rate", "E001", "Must be a valid number")
+        elif dr < 0:    _bad("decay_rate", "E002", "decay_rate must be >= 0")
+        if _num("initial", "0.0") is None: _bad("initial", "E001", "Must be a valid number")
+
+    # ---- PythonFcn ----------------------------------------------------------
+    elif btype == "PythonFcn":
+        ni = _num("num_inputs", "1")
+        if ni is None:
+            _bad("num_inputs", "E001", "Must be a valid integer")
+        elif int(ni) < 1 or int(ni) > 4:
+            _bad("num_inputs", "E002", "num_inputs must be 1, 2, 3, or 4")
+        code_str = p.get("code", "").strip()
+        if not code_str:
+            _bad("code", "E001", "code expression must not be empty")
+        else:
+            # Try a dry-run compile to catch obvious syntax errors
+            try:
+                compile(code_str, "<PythonFcn>", "eval")
+            except SyntaxError:
+                # Might be a multi-line exec-mode block — try that
+                try:
+                    compile(code_str, "<PythonFcn>", "exec")
+                except SyntaxError as se:
+                    _bad("code", "E003", f"Syntax error in code: {se}")
+
+    # ---- WeightedSum ---------------------------------------------------------
+    elif btype == "WeightedSum":
+        ni = _num("num_inputs", "4")
+        if ni is None:
+            _bad("num_inputs", "E001", "Must be a valid integer")
+        elif int(ni) < 1 or int(ni) > 8:
+            _bad("num_inputs", "E002", "num_inputs must be 1–8")
+        else:
+            n_ = int(ni)
+            gains_str = p.get("gains", "1 1 1 1").strip()
+            gain_parts = gains_str.split()
+            if len(gain_parts) != n_:
+                _bad("gains", "E002",
+                     f"gains must have exactly {n_} values (num_inputs={n_}), "
+                     f"got {len(gain_parts)}")
+            else:
+                for gv in gain_parts:
+                    try:
+                        float(gv)
+                    except ValueError:
+                        _bad("gains", "E001", f"Non-numeric gain value: {gv!r}")
+                        break
+
+    # ---- PlantODE -----------------------------------------------------------
+    elif btype == "PlantODE":
+        order_ = _num("order", "2")
+        if order_ is None:
+            _bad("order", "E001", "Must be a valid integer")
+        else:
+            n_ = int(order_)
+            if n_ < 1 or n_ > 8:
+                _bad("order", "E002", "order must be 1–8")
+            # Validate initial_state length
+            ic_str = p.get("initial_state", "0 0").strip()
+            ic_parts = ic_str.split()
+            if len(ic_parts) != n_:
+                _bad("initial_state", "E001",
+                     f"initial_state must have {n_} values (order={n_}), "
+                     f"got {len(ic_parts)}")
+            else:
+                for iv in ic_parts:
+                    try:
+                        float(iv)
+                    except ValueError:
+                        _bad("initial_state", "E001",
+                             f"Non-numeric initial_state value: {iv!r}")
+                        break
+            # Validate num_outputs <= order
+            nout_ = _num("num_outputs", "2")
+            if nout_ is None:
+                _bad("num_outputs", "E001", "Must be a valid integer")
+            elif int(nout_) > n_:
+                _bad("num_outputs", "E002",
+                     f"num_outputs ({int(nout_)}) must be ≤ order ({n_})")
+            # Validate equation count and syntax
+            eqs = [e.strip() for e in p.get("equations", "").splitlines() if e.strip()]
+            if len(eqs) != n_:
+                _bad("equations", "E001",
+                     f"equations must have {n_} lines (one per state), got {len(eqs)}")
+            else:
+                for i, eq in enumerate(eqs):
+                    try:
+                        compile(eq, f"<PlantODE eq{i}>", "eval")
+                    except SyntaxError as se:
+                        _bad("equations", "E003",
+                             f"Syntax error in equation {i}: {se}")
+                        break
+
+    # ---- AngleUnwrap --------------------------------------------------------
+    elif btype == "AngleUnwrap":
+        rng = p.get("range", "auto").strip()
+        if rng not in ("auto", "360"):
+            _bad("range", "E003", "range must be 'auto' (±π rad) or '360' (±180°)")
+
+    # ---- HBridgeOut ---------------------------------------------------------
+    elif btype == "HBridgeOut":
+        db = _num("dead_band_pct", "5.0")
+        md = _num("max_duty",      "100.0")
+        if db is None:
+            _bad("dead_band_pct", "E001", "Must be a valid number")
+        elif db < 0 or db > 50:
+            _bad("dead_band_pct", "E002", "dead_band_pct must be 0–50")
+        if md is None:
+            _bad("max_duty", "E001", "Must be a valid number")
+        elif md <= 0:
+            _bad("max_duty", "E002", "max_duty must be > 0")
+        ch = _num("channel", "1")
+        if ch is None:
+            _bad("channel", "E001", "Must be a valid integer")
+        elif int(ch) < 1 or int(ch) > 4:
+            _bad("channel", "E002", "channel must be 1–4")
+        dir_pin = p.get("dir_pin", "PB0").strip()
+        if not _is_valid_stm32_pin(dir_pin):
+            _bad("dir_pin", "E004",
+                 f"Invalid STM32 GPIO pin: {dir_pin!r}. Use format Pxnn (e.g. PB0).")
+
+    # ---- DiscreteIntegratorAW -----------------------------------------------
+    elif btype == "DiscreteIntegratorAW":
+        if _num("gain_value",        "1.0")  is None:
+            _bad("gain_value",        "E001", "Must be a valid number")
+        if _num("initial_condition", "0.0")  is None:
+            _bad("initial_condition", "E001", "Must be a valid number")
+        ul = _num("upper_limit",  "1e10")
+        ll = _num("lower_limit", "-1e10")
+        if ul is None:  _bad("upper_limit",  "E001", "Must be a valid number")
+        if ll is None:  _bad("lower_limit",  "E001", "Must be a valid number")
+        if ul is not None and ll is not None and ul <= ll:
+            _bad("upper_limit", "E007", "upper_limit must be strictly greater than lower_limit")
+        meth = p.get("method", "Forward Euler").strip()
+        if meth not in ("Forward Euler", "Backward Euler", "Trapezoidal"):
+            _bad("method", "E003",
+                 "method must be one of: Forward Euler, Backward Euler, Trapezoidal")
+        if _num("back_calc_coeff", "0.0") is None:
+            _bad("back_calc_coeff", "E001", "Must be a valid number")
+
+    return errors
+
+
+def validate_model(model: dict, workspace=None) -> List[ValidationError]:
+    """Validate all block parameters in *model*.
+
+    Returns a (possibly empty) list of :class:`ValidationError` objects.
+    An empty list means the model is ready to simulate / generate code.
+
+    Error codes
+    -----------
+    E001  Invalid value — cannot be parsed as a number
+    E002  Out of range — numeric value violates a constraint
+    E003  Invalid option string — not one of the allowed choices
+    E004  Invalid pin name — does not match STM32 Pxnn format
+    E005  Invalid identifier — not a legal Python variable name
+    E006  Improper transfer function — numerator degree > denominator degree
+    E007  Limit conflict — upper_limit ≤ lower_limit
+    """
+    errors: List[ValidationError] = []
+    for b in model.get("blocks", []):
+        errors.extend(_validate_block(b, workspace))
+
+    # E008 — sample_time_ms must be a positive integer multiple of step_ms
+    if model.get("use_rtos", False):
+        step_ms = int(model.get("step_ms", 1))
+        for b in model.get("blocks", []):
+            st = int(b.get("sample_time_ms", 0))
+            if st == 0:
+                continue
+            if st < step_ms or st % step_ms != 0:
+                errors.append(ValidationError(
+                    block_id=b["id"], block_type=b["type"],
+                    param="sample_time_ms", code="E008",
+                    message=f"sample_time_ms ({st} ms) must be a positive integer "
+                            f"multiple of step_ms ({step_ms} ms)"
+                ))
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Pure-Python simulator (for the "Simulate Model" button)
 # ---------------------------------------------------------------------------
+
+def _parse_matrix(s: str) -> "np.ndarray":
+    """Parse a matrix from a string. Rows separated by ';', cols by spaces.
+    A scalar string like '1' or '0' returns a 1×1 array.
+    A row vector like '1 0' returns a 1×2 array (will be flattened to 1-D where needed).
+    A column vector '0; 1' returns a 2×1 array.
+    """
+    rows = [r.strip() for r in s.split(";") if r.strip()]
+    if not rows:
+        return np.array([[0.0]])
+    result = []
+    for row in rows:
+        result.append([float(v) for v in row.split()])
+    # Make jagged rows same length (pad with zeros)
+    max_cols = max(len(r) for r in result)
+    for r in result:
+        while len(r) < max_cols:
+            r.append(0.0)
+    return np.array(result, dtype=float)
+
 
 def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Run the block diagram numerically on the host, without hardware.
 
-    Only the supported blocks (SquareWave, GpioIn, GpioOut, Scope) are
-    simulated. GpioIn is treated as a constant 0 input since there is no
-    real button; users can override by assigning ``gpioin_<id>`` in the
-    workspace.
+    Per-sample scalar simulation so that feedback loops (e.g. discrete
+    integrator in a unity-feedback loop) work correctly.  Delay-type blocks
+    (DiscreteIntegrator, UnitDelay, TransportDelay, ZeroOrderHold, …) emit
+    their *stored* state at the start of each sample before reading their
+    input, which naturally breaks algebraic loops.
     """
-    n = int(duration_s / step_s)
-    t = np.arange(n) * step_s
-
-    # Evaluate each block's output trace
-    outs: Dict[Tuple[str, str], np.ndarray] = {}
+    n       = max(1, int(duration_s / step_s))
+    t_arr   = np.arange(n) * step_s
 
     def pval(pstr: str) -> float:
         return float(WORKSPACE.eval_param(pstr))
 
-    blocks_by_id = {b["id"]: b for b in model["blocks"]}
+    # -----------------------------------------------------------------------
+    # Wire map: (dst_block_id, dst_port) → (src_block_id, src_port)
+    # -----------------------------------------------------------------------
+    wires: Dict[Tuple[str, str], Tuple[str, str]] = {
+        (c["dst_block"], c["dst_port"]): (c["src_block"], c["src_port"])
+        for c in model["connections"]
+    }
 
-    # First pass: produce outputs for source blocks
-    for b in model["blocks"]:
-        if b["type"] == "SquareWave":
-            f = pval(b["params"]["frequency_hz"])
-            A = pval(b["params"]["amplitude"])
-            off = pval(b["params"]["offset"])
-            duty = pval(b["params"]["duty"])
-            phase = (t * f) % 1.0
-            y = np.where(phase < duty, A, off)
-            outs[(b["id"], "y")] = y
-        elif b["type"] == "Constant":
-            val = pval(b["params"]["value"])
-            outs[(b["id"], "y")] = np.full(n, val)
-        elif b["type"] == "GpioIn":
-            override = WORKSPACE.globals.get(f"gpioin_{b['id']}")
-            if override is None:
-                outs[(b["id"], "y")] = np.zeros(n)
+    # Topological order (delay blocks come first in any cycle — see _ct_topo_order)
+    blocks: list = _ct_topo_order(model)
+
+    # -----------------------------------------------------------------------
+    # Pre-compute constant block parameters and pre-build state for every
+    # stateful block so we don't re-parse strings inside the hot loop.
+    # -----------------------------------------------------------------------
+    # ST maps block-id → mutable state dict
+    ST: Dict[str, dict] = {}
+    # BP maps block-id → frozen param dict (pre-evaluated scalars / arrays)
+    BP: Dict[str, dict] = {}
+
+    for b in blocks:
+        bid   = b["id"]
+        btype = b["type"]
+        p     = b["params"]
+
+        if btype == "RandomNumber":
+            mean = pval(p.get("mean",     "0.0"))
+            var_ = pval(p.get("variance", "1.0"))
+            seed = p.get("seed", "-1").strip()
+            try:
+                s = int(float(seed))
+            except ValueError:
+                s = -1
+            rng  = np.random.default_rng(None if s < 0 else s)
+            BP[bid] = {"mean": mean, "std": math.sqrt(max(var_, 0.0)),
+                       "samples": rng.normal(mean, math.sqrt(max(var_, 0.0)), n)}
+
+        elif btype == "FromWorkspace":
+            vname   = p.get("variable_name", "u").strip()
+            default = pval(p.get("default", "0.0"))
+            arr = WORKSPACE.globals.get(vname)
+            if arr is None:
+                data = np.full(n, default)
             else:
-                outs[(b["id"], "y")] = np.asarray(override)[:n]
-        elif b["type"] == "Ultrasonic":
-            override = WORKSPACE.globals.get(f"ultrasonic_{b['id']}")
+                data = np.asarray(arr, dtype=float).flatten()
+                out  = np.full(n, default)
+                m    = min(n, len(data))
+                out[:m] = data[:m]
+                data = out
+            BP[bid] = {"data": data}
+
+        elif btype == "Ultrasonic":
+            override = WORKSPACE.globals.get(f"ultrasonic_{bid}")
             if override is None:
-                outs[(b["id"], "d")] = np.zeros(n)
+                data = np.zeros(n)
             else:
                 arr = np.asarray(override, dtype=float)
-                if arr.ndim == 0:
-                    outs[(b["id"], "d")] = np.full(n, float(arr))
-                else:
-                    outs[(b["id"], "d")] = arr[:n]
-        elif b["type"] == "Step":
-            st  = pval(b["params"].get("step_time",     "1.0"))
-            iv  = pval(b["params"].get("initial_value",  "0.0"))
-            fv  = pval(b["params"].get("final_value",    "1.0"))
-            outs[(b["id"], "y")] = np.where(t >= st, fv, iv)
+                data = np.full(n, float(arr)) if arr.ndim == 0 else arr[:n].copy()
+            BP[bid] = {"data": data}
 
-    # Build wire map once for all subsequent passes.
-    wires: Dict[Tuple[str, str], Tuple[str, str]] = {}
-    for c in model["connections"]:
-        wires[(c["dst_block"], c["dst_port"])] = (c["src_block"], c["src_port"])
+        elif btype == "GpioIn":
+            override = WORKSPACE.globals.get(f"gpioin_{bid}")
+            if override is None:
+                data = np.zeros(n)
+            else:
+                data = np.asarray(override, dtype=float).flatten()
+                if len(data) < n:
+                    data = np.concatenate([data, np.zeros(n - len(data))])
+            BP[bid] = {"data": data}
 
-    # Middle pass: all blocks with inputs, in topological order.
-    for b in _ct_topo_order(model):
-        bid = b["id"]
-
-        def _input(port: str, default: float = 0.0) -> np.ndarray:
-            src = wires.get((bid, port))
-            if src is None:
-                return np.full(n, default)
-            return outs.get(src, np.full(n, default))
-
-        if b["type"] == "Sum":
-            outs[(bid, "y")] = _input("u0") + _input("u1")
-
-        elif b["type"] == "Product":
-            outs[(bid, "y")] = _input("u0", 1.0) * _input("u1", 1.0)
-
-        elif b["type"] == "Integrator":
-            u_arr = _input("u")
-            ic    = pval(b["params"].get("initial_value",  "0.0"))
-            upper = pval(b["params"].get("upper_limit",    "1e10"))
-            lower = pval(b["params"].get("lower_limit",   "-1e10"))
-            # Forward Euler: y[k] = ic + sum(u[0..k-1]) * dt
-            y = ic + np.concatenate([[0.0], np.cumsum(u_arr[:-1])]) * step_s
-            outs[(bid, "y")] = np.clip(y, lower, upper)
-
-        elif b["type"] == "TransferFcn":
-            u_arr   = _input("u")
-            num_str = b["params"].get("numerator",   "1")
-            den_str = b["params"].get("denominator", "1 1")
+        elif btype == "TransferFcn":
+            num_str = p.get("numerator",   "1")
+            den_str = p.get("denominator", "1 1")
             try:
                 bz, az = _bilinear_tf(num_str, den_str, 1.0 / step_s)
-                # Use scipy if available; fall back to a pure-numpy IIR
-                try:
-                    from scipy.signal import lfilter
-                    y = lfilter(bz, az, u_arr)
-                except ImportError:
-                    y = np.zeros(n)
-                    order = len(az) - 1
-                    s = np.zeros(order)          # Direct Form II Transposed state
-                    for k in range(n):
-                        yk = bz[0] * u_arr[k] + (s[0] if order else 0.0)
-                        for j in range(order - 1):
-                            s[j] = bz[j+1]*u_arr[k] - az[j+1]*yk + s[j+1]
-                        if order:
-                            s[order-1] = bz[order]*u_arr[k] - az[order]*yk
-                        y[k] = yk
+                order  = len(az) - 1
             except Exception:
-                y = np.zeros(n)
-            outs[(bid, "y")] = y
+                bz, az = np.array([1.0]), np.array([1.0])
+                order  = 0
+            BP[bid] = {"bz": bz, "az": az}
+            ST[bid] = {"s": np.zeros(max(order, 1))}
 
-        elif b["type"] == "PID":
-            u_arr  = _input("u")
-            Kp     = pval(b["params"].get("Kp",          "1.0"))
-            Ki     = pval(b["params"].get("Ki",          "0.0"))
-            Kd     = pval(b["params"].get("Kd",          "0.0"))
-            N_filt = pval(b["params"].get("N",          "100.0"))
-            upper  = pval(b["params"].get("upper_limit", "1e10"))
-            lower  = pval(b["params"].get("lower_limit","-1e10"))
-            KdN    = Kd * N_filt
-            N_dt   = min(N_filt * step_s, 1.99)   # clamp for forward-Euler stability
-            y      = np.empty(n)
-            integ  = 0.0
-            d_st   = 0.0
-            for k in range(n):
-                e      = u_arr[k]
-                p_out  = Kp * e
-                integ += Ki * e * step_s
-                d_out  = KdN * (e - d_st)
-                d_st  += N_dt * (e - d_st)
-                raw    = p_out + integ + d_out
-                y[k]   = max(lower, min(upper, raw))
-            outs[(bid, "y")] = y
+        elif btype == "ZeroPoleGain":
+            zeros_str = p.get("zeros", "").strip()
+            poles_str = p.get("poles", "-1").strip()
+            gain_     = pval(p.get("gain", "1.0"))
+            try:
+                z_arr = (np.array([float(v) for v in zeros_str.split()])
+                         if zeros_str else np.array([]))
+                pa    = np.array([float(v) for v in poles_str.split()])
+                num_s = np.atleast_1d(gain_ * np.real(np.poly(z_arr)))
+                den_s = np.atleast_1d(np.real(np.poly(pa)))
+                num_str = " ".join(str(c) for c in num_s)
+                den_str = " ".join(str(c) for c in den_s)
+                bz, az = _bilinear_tf(num_str, den_str, 1.0 / step_s)
+                order  = len(az) - 1
+            except Exception:
+                bz, az = np.array([1.0]), np.array([1.0])
+                order  = 0
+            BP[bid] = {"bz": bz, "az": az}
+            ST[bid] = {"s": np.zeros(max(order, 1))}
 
-    # ToWorkspace: capture signal into the Python workspace and expose it to
-    # the Simulate Scope tab so the user can see what was saved.
+        elif btype == "DiscreteTransferFcn":
+            num_str = p.get("numerator",   "1")
+            den_str = p.get("denominator", "1 -1")
+            try:
+                bz = np.array([float(x) for x in num_str.split()])
+                az = np.array([float(x) for x in den_str.split()])
+                az = az / az[0]
+                if len(bz) < len(az):
+                    bz = np.concatenate([np.zeros(len(az) - len(bz)), bz])
+                order = len(az) - 1
+            except Exception:
+                bz, az = np.array([1.0]), np.array([1.0])
+                order  = 0
+            BP[bid] = {"bz": bz, "az": az}
+            ST[bid] = {"s": np.zeros(max(order, 1))}
+
+        elif btype == "PID":
+            BP[bid] = {
+                "Kp":    pval(p.get("Kp",          "1.0")),
+                "Ki":    pval(p.get("Ki",          "0.0")),
+                "Kd":    pval(p.get("Kd",          "0.0")),
+                "N":     pval(p.get("N",          "100.0")),
+                "upper": pval(p.get("upper_limit", "1e10")),
+                "lower": pval(p.get("lower_limit","-1e10")),
+            }
+            ST[bid] = {"integ": 0.0, "d_st": 0.0}
+
+        elif btype == "Integrator":
+            BP[bid] = {
+                "ic":    pval(p.get("initial_value", "0.0")),
+                "upper": pval(p.get("upper_limit",   "1e10")),
+                "lower": pval(p.get("lower_limit",  "-1e10")),
+            }
+            ST[bid] = {"s": pval(p.get("initial_value", "0.0"))}
+
+        elif btype == "DiscreteIntegrator":
+            ic_ = pval(p.get("initial_condition", "0.0"))
+            BP[bid] = {
+                "K":     pval(p.get("gain_value",        "1.0")),
+                "upper": pval(p.get("upper_limit",  "1e10")),
+                "lower": pval(p.get("lower_limit", "-1e10")),
+                "meth":  p.get("method", "Forward Euler").strip(),
+                "ic":    ic_,
+            }
+            ST[bid] = {"s": ic_, "u_prev": 0.0}
+
+        elif btype == "UnitDelay":
+            ic_ = pval(p.get("initial_condition", "0.0"))
+            ST[bid] = {"s": ic_}
+
+        elif btype == "ZeroOrderHold":
+            sample_t = max(step_s, pval(p.get("sample_time", "0.01")))
+            BP[bid]  = {"sample_t": sample_t}
+            ST[bid]  = {"held": 0.0, "next_samp": 0.0}
+
+        elif btype == "Derivative":
+            ic_ = pval(p.get("initial_condition", "0.0"))
+            ST[bid] = {"u_prev": ic_}
+
+        elif btype == "TransportDelay":
+            delay = max(1, int(round(pval(p.get("delay_samples", "10")))))
+            ic_   = pval(p.get("initial_condition", "0.0"))
+            BP[bid] = {"delay": delay}
+            ST[bid] = {"buf": [ic_] * delay}   # ring buffer
+
+        elif btype == "RateLimiter":
+            BP[bid] = {
+                "rl": pval(p.get("rising_limit",      "1.0")),
+                "fl": pval(p.get("falling_limit",    "-1.0")),
+            }
+            ST[bid] = {"prev": pval(p.get("initial_condition", "0.0"))}
+
+        elif btype == "Relay":
+            BP[bid] = {
+                "on_thr":  pval(p.get("on_threshold",  "0.5")),
+                "off_thr": pval(p.get("off_threshold", "-0.5")),
+                "on_val":  pval(p.get("on_value",  "1.0")),
+                "off_val": pval(p.get("off_value", "0.0")),
+            }
+            ST[bid] = {"state": pval(p.get("off_value", "0.0"))}
+
+        elif btype == "StateSpace":
+            A_str  = p.get("A", "0")
+            B_str  = p.get("B", "1")
+            C_str  = p.get("C", "1")
+            D_val  = pval(p.get("D", "0"))
+            ic_str = p.get("initial_state", "").strip()
+            method = p.get("method", "euler").strip().lower()
+            try:
+                A_mat = _parse_matrix(A_str)
+                B_mat = _parse_matrix(B_str)
+                C_mat = _parse_matrix(C_str)
+                ns    = A_mat.shape[0]
+                B_vec = B_mat.flatten()[:ns]
+                C_vec = C_mat.flatten()[:ns]
+                x0    = (np.array([float(v) for v in ic_str.split()])
+                         if ic_str else np.zeros(ns))
+                if method == "zoh":
+                    try:
+                        from scipy.signal import cont2discrete as _c2d
+                        _sys = (A_mat, B_vec.reshape(-1,1),
+                                C_vec.reshape(1,-1), np.array([[D_val]]))
+                        Ad, Bd_m, _, _, _ = _c2d(_sys, step_s, method="zoh")
+                        Bd = Bd_m.flatten()
+                    except Exception:
+                        Ad = np.eye(ns) + A_mat * step_s
+                        Bd = B_vec * step_s
+                else:
+                    Ad = np.eye(ns) + A_mat * step_s
+                    Bd = B_vec * step_s
+                BP[bid] = {"Ad": Ad, "Bd": Bd, "C": C_vec, "D": D_val, "ns": ns}
+                ST[bid] = {"x": x0.copy()}
+            except Exception:
+                BP[bid] = None
+                ST[bid] = {}
+
+        elif btype == "DiscreteStateSpace":
+            Ad_str = p.get("Ad", "1")
+            Bd_str = p.get("Bd", "1")
+            Cd_str = p.get("Cd", "1")
+            Dd_val = pval(p.get("Dd", "0"))
+            ic_str = p.get("initial_state", "").strip()
+            try:
+                Ad = _parse_matrix(Ad_str)
+                Bd = _parse_matrix(Bd_str).flatten()[:Ad.shape[0]]
+                Cd = _parse_matrix(Cd_str).flatten()[:Ad.shape[0]]
+                x0 = (np.array([float(v) for v in ic_str.split()])
+                      if ic_str else np.zeros(Ad.shape[0]))
+                BP[bid] = {"Ad": Ad, "Bd": Bd, "Cd": Cd, "Dd": Dd_val}
+                ST[bid] = {"x": x0.copy()}
+            except Exception:
+                BP[bid] = None
+                ST[bid] = {}
+
+        elif btype == "FIRFilter":
+            c_str = p.get("coefficients", "0.25 0.25 0.25 0.25")
+            try:
+                coeffs = np.array([float(x) for x in c_str.split()], dtype=float)
+            except Exception:
+                coeffs = np.array([1.0])
+            nt = len(coeffs)
+            BP[bid] = {"coeffs": coeffs}
+            ST[bid] = {"buf": np.zeros(nt)}   # shift register
+
+        elif btype == "BiquadFilter":
+            BP[bid] = {
+                "b0": pval(p.get("b0", "1.0")), "b1": pval(p.get("b1", "0.0")),
+                "b2": pval(p.get("b2", "0.0")), "a1": pval(p.get("a1", "0.0")),
+                "a2": pval(p.get("a2", "0.0")),
+            }
+            ST[bid] = {"w1": 0.0, "w2": 0.0}
+
+        elif btype == "RunningRMS":
+            w = max(1, int(round(pval(p.get("window", "100")))))
+            BP[bid] = {"w": w}
+            ST[bid] = {"buf": np.zeros(w), "idx": 0, "sum_sq": 0.0}
+
+        elif btype == "MedianFilter":
+            w = max(1, int(round(pval(p.get("window", "5")))))
+            BP[bid] = {"w": w}
+            ST[bid] = {"buf": []}
+
+        elif btype == "MovingAverage":
+            w = max(1, int(round(pval(p.get("window", "10")))))
+            BP[bid] = {"w": w}
+            ST[bid] = {"buf": np.zeros(w), "idx": 0, "acc": 0.0}
+
+        elif btype == "NCO":
+            BP[bid] = {
+                "amp": pval(p.get("amplitude",     "1.0")),
+                "phi0": pval(p.get("initial_phase", "0.0")) * math.pi / 180.0,
+            }
+            ST[bid] = {"phi": pval(p.get("initial_phase", "0.0")) * math.pi / 180.0}
+
+        elif btype == "PeakDetector":
+            BP[bid] = {
+                "mode":  p.get("mode", "max").strip().lower(),
+                "decay": pval(p.get("decay_rate", "0.0")),
+            }
+            ST[bid] = {"peak": pval(p.get("initial", "0.0"))}
+
+        elif btype == "DetectRisePositive":
+            ST[bid] = {"prev": pval(p.get("initial_condition", "0.0"))}
+
+        elif btype == "Lookup1D":
+            extrap = p.get("extrapolation", "clip").strip().lower()
+            try:
+                bp_  = np.array([float(x) for x in p.get("breakpoints","0 1").split()])
+                tbl_ = np.array([float(x) for x in p.get("table_data",  "0 1").split()])
+            except Exception:
+                bp_ = np.array([0.0, 1.0])
+                tbl_= np.array([0.0, 1.0])
+            BP[bid] = {"bp": bp_, "tbl": tbl_, "extrap": extrap}
+
+        elif btype == "Lookup2D":
+            rbp_str = p.get("row_breakpoints", "0 1")
+            cbp_str = p.get("col_breakpoints", "0 1")
+            tbl_str = p.get("table", "0 1; 1 2")
+            try:
+                rbp_ = np.array([float(x) for x in rbp_str.split()])
+                cbp_ = np.array([float(x) for x in cbp_str.split()])
+                rows = [[float(v) for v in row.split()]
+                        for row in tbl_str.split(";") if row.strip()]
+                tbl_ = np.array(rows, dtype=float)
+            except Exception:
+                rbp_ = np.array([0.0, 1.0])
+                cbp_ = np.array([0.0, 1.0])
+                tbl_ = np.zeros((2, 2))
+            BP[bid] = {"rbp": rbp_, "cbp": cbp_, "tbl": tbl_}
+
+        # ---- WeightedSum ----------------------------------------------------
+        elif btype == "WeightedSum":
+            try:
+                ni_  = max(1, min(8, int(float(p.get("num_inputs", "4")))))
+                gvs  = [float(g) for g in p.get("gains", "1 1 1 1").split()]
+                if len(gvs) < ni_:
+                    gvs += [1.0] * (ni_ - len(gvs))
+                BP[bid] = {"ni": ni_, "gains": gvs[:ni_]}
+            except Exception:
+                BP[bid] = {"ni": 1, "gains": [1.0]}
+
+        # ---- PlantODE -------------------------------------------------------
+        elif btype == "PlantODE":
+            try:
+                order_   = max(1, min(8, int(float(p.get("order", "2")))))
+                ic_parts = p.get("initial_state", "0 0").strip().split()
+                x0_      = [float(v) for v in ic_parts]
+                if len(x0_) < order_:
+                    x0_ += [0.0] * (order_ - len(x0_))
+                x0_ = x0_[:order_]
+                nout_    = max(1, min(4, min(order_,
+                               int(float(p.get("num_outputs", "2"))))))
+                eqs_     = [e.strip()
+                            for e in p.get("equations",
+                                           "x[1]\n-9.81*math.sin(x[0])-0.1*x[1]+u"
+                                           ).splitlines() if e.strip()]
+                BP[bid]  = {"order": order_, "eqs": eqs_, "nout": nout_}
+                ST[bid]  = {"x": list(x0_)}
+            except Exception:
+                BP[bid] = {"order": 1, "eqs": ["0"], "nout": 1}
+                ST[bid] = {"x": [0.0]}
+
+        # ---- AngleUnwrap ----------------------------------------------------
+        elif btype == "AngleUnwrap":
+            rng_ = p.get("range", "auto").strip()
+            full_ = 2.0 * math.pi if rng_ != "360" else 360.0
+            BP[bid] = {"full": full_, "half": full_ * 0.5}
+            ST[bid] = {"prev": 0.0, "offset": 0.0}
+
+        # ---- HBridgeOut -----------------------------------------------------
+        elif btype == "HBridgeOut":
+            try:
+                md_  = max(1e-9, float(p.get("max_duty", "100.0")))
+                db_  = max(0.0,  float(p.get("dead_band_pct", "5.0")))
+                BP[bid] = {"max_duty": md_, "dead_band": db_ / 100.0 * md_}
+            except Exception:
+                BP[bid] = {"max_duty": 100.0, "dead_band": 5.0}
+
+        # ---- DiscreteIntegratorAW -------------------------------------------
+        elif btype == "DiscreteIntegratorAW":
+            try:
+                ic_  = pval(p.get("initial_condition", "0.0"))
+            except Exception:
+                ic_  = 0.0
+            try:
+                kaw_ = float(p.get("back_calc_coeff", "0.0"))
+            except Exception:
+                kaw_ = 0.0
+            try:
+                upper_ = pval(p.get("upper_limit",  "1e10"))
+                lower_ = pval(p.get("lower_limit", "-1e10"))
+            except Exception:
+                upper_, lower_ = 1e10, -1e10
+            try:
+                K_   = pval(p.get("gain_value", "1.0"))
+            except Exception:
+                K_   = 1.0
+            BP[bid] = {"K": K_, "upper": upper_, "lower": lower_, "kaw": kaw_}
+            ST[bid] = {"s": ic_}
+
+    # -----------------------------------------------------------------------
+    # Accumulation arrays — filled per sample
+    # -----------------------------------------------------------------------
+    full: Dict[Tuple[str, str], np.ndarray] = {}
+    cur:  Dict[Tuple[str, str], float]      = {}   # current-sample scalars
+
+    # -----------------------------------------------------------------------
+    # Per-sample main loop
+    # -----------------------------------------------------------------------
+    # pending_updates holds (callable) state-update closures that must run
+    # AFTER the full topo pass so that feedback-path blocks (e.g. Sum) have
+    # been computed before delay blocks (DI, UnitDelay, …) integrate/latch.
+    pending_updates: list = []
+
+    # Multi-rate support: blocks with sample_time_ms > 0 execute only on
+    # their own period; between executions their last output is re-published.
+    _base_ms: int = max(1, int(round(step_s * 1000.0)))
+    _period_samples: Dict[str, int] = {}
+    for _b in blocks:
+        _st = int(_b.get("sample_time_ms", 0))
+        _period_samples[_b["id"]] = 1 if _st <= 0 else max(1, _st // _base_ms)
+    _held_output: Dict[Tuple[str, str], float] = {}
+
+    for k in range(n):
+        t_k = t_arr[k]
+        cur.clear()
+        pending_updates.clear()
+
+        # Helper: read a wired input scalar; returns 'default' if unwired
+        def gi(port: str, default: float = 0.0, _bid: str = "") -> float:
+            src = wires.get((_bid, port))
+            if src is None:
+                return default
+            return cur.get(src, default)
+
+        for b in blocks:
+            bid   = b["id"]
+            btype = b["type"]
+            p     = b["params"]
+
+            # Rebind gi for this block
+            def _gi(port: str, default: float = 0.0) -> float:
+                src = wires.get((bid, port))
+                if src is None:
+                    return default
+                return cur.get(src, default)
+
+            # Multi-rate gating: skip execution on off-period samples,
+            # re-publishing the last computed output so downstream blocks
+            # see a held (zero-order-hold) value.
+            _blk_period = _period_samples[bid]
+            if _blk_period > 1 and (k % _blk_period) != 0:
+                for _hk, _hv in _held_output.items():
+                    if _hk[0] == bid:
+                        cur[_hk] = _hv
+                continue
+
+            # ----------------------------------------------------------
+            # Source blocks (no wired inputs)
+            # ----------------------------------------------------------
+            if btype == "Constant":
+                cur[(bid, "y")] = pval(p.get("value", "0.0"))
+
+            elif btype == "Step":
+                st_  = pval(p.get("step_time",    "1.0"))
+                iv_  = pval(p.get("initial_value", "0.0"))
+                fv_  = pval(p.get("final_value",   "1.0"))
+                cur[(bid, "y")] = fv_ if t_k >= st_ else iv_
+
+            elif btype == "SquareWave":
+                f_   = pval(p["frequency_hz"])
+                A_   = pval(p["amplitude"])
+                off_ = pval(p["offset"])
+                duty_= pval(p["duty"])
+                phase_ = (t_k * f_) % 1.0
+                cur[(bid, "y")] = A_ if phase_ < duty_ else off_
+
+            elif btype == "SineWave":
+                freq_ = pval(p.get("frequency_hz", "1.0"))
+                amp_  = pval(p.get("amplitude",    "1.0"))
+                ph_   = pval(p.get("phase_deg",    "0.0")) * math.pi / 180.0
+                off_  = pval(p.get("offset",       "0.0"))
+                cur[(bid, "y")] = amp_ * math.sin(2.0 * math.pi * freq_ * t_k + ph_) + off_
+
+            elif btype == "Ramp":
+                slope_ = pval(p.get("slope",          "1.0"))
+                start_ = pval(p.get("start_time",     "0.0"))
+                init_  = pval(p.get("initial_output", "0.0"))
+                cur[(bid, "y")] = (init_ + slope_ * (t_k - start_)
+                                   if t_k >= start_ else init_)
+
+            elif btype == "Clock":
+                cur[(bid, "y")] = t_k
+
+            elif btype == "PulseGenerator":
+                amp_  = pval(p.get("amplitude",  "1.0"))
+                per_  = max(1e-9, pval(p.get("period",      "1.0")))
+                pw_   = pval(p.get("pulse_width", "50")) / 100.0
+                dly_  = pval(p.get("phase_delay", "0.0"))
+                if t_k >= dly_:
+                    t_rel_ = math.fmod(t_k - dly_, per_)
+                    cur[(bid, "y")] = amp_ if t_rel_ < pw_ * per_ else 0.0
+                else:
+                    cur[(bid, "y")] = 0.0
+
+            elif btype == "Chirp":
+                A_   = pval(p.get("amplitude",  "1.0"))
+                f0_  = pval(p.get("f_start",    "1.0"))
+                f1_  = pval(p.get("f_end",     "10.0"))
+                tsw_ = pval(p.get("sweep_time", "5.0"))
+                ph_  = pval(p.get("phase_deg",  "0.0")) * math.pi / 180.0
+                t_e  = min(t_k, tsw_)
+                phi_ = 2.0 * math.pi * (f0_ * t_e + (f1_ - f0_) * t_e**2 / (2.0 * tsw_))
+                cur[(bid, "y")] = A_ * math.sin(phi_ + ph_)
+
+            elif btype == "RandomNumber":
+                cur[(bid, "y")] = float(BP[bid]["samples"][k])
+
+            elif btype == "FromWorkspace":
+                cur[(bid, "y")] = float(BP[bid]["data"][k])
+
+            elif btype == "GpioIn":
+                data_ = BP[bid]["data"]
+                cur[(bid, "y")] = float(data_[k]) if k < len(data_) else 0.0
+
+            elif btype == "Ultrasonic":
+                data_ = BP[bid]["data"]
+                cur[(bid, "d")] = float(data_[k]) if k < len(data_) else 0.0
+
+            elif btype == "ADC":
+                cur[(bid, "y")] = pval(p.get("sim_value", "0.0"))
+
+            elif btype == "TimerTick":
+                scale_ = pval(p.get("scale", "0.001"))
+                cur[(bid, "y")] = t_k * 1000.0 * scale_
+
+            elif btype == "EncoderRead":
+                cur[(bid, "y")] = pval(p.get("sim_value", "0.0"))
+
+            elif btype == "Ground":
+                cur[(bid, "y")] = 0.0
+
+            elif btype == "I2CRead":
+                cur[(bid, "y")] = pval(p.get("sim_value", "0.0"))
+
+            # ----------------------------------------------------------
+            # Delay / memory blocks — TWO-PHASE:
+            #   Phase 1 (now):  emit stored state into cur[]
+            #   Phase 2 (after full topo pass): read now-resolved inputs
+            #                   and update internal state
+            # This correctly breaks algebraic loops regardless of topo order.
+            # ----------------------------------------------------------
+            elif btype == "UnitDelay":
+                st_ = ST[bid]
+                cur[(bid, "y")] = st_["s"]          # output previous value
+                _ud_bid = bid
+                def _ud_update(_st=st_, _wires=wires, _cur=cur, _bid=_ud_bid):
+                    src = _wires.get((_bid, "u"))
+                    _st["s"] = float(_cur.get(src, 0.0)) if src else 0.0
+                pending_updates.append(_ud_update)
+
+            elif btype == "DiscreteIntegrator":
+                st_    = ST[bid]
+                bp_    = BP[bid]
+                upper_ = bp_["upper"]
+                lower_ = bp_["lower"]
+                # Phase 1: emit current state
+                cur[(bid, "y")] = max(lower_, min(upper_, st_["s"]))
+                _di_bid = bid
+                def _di_update(_st=st_, _bp=bp_, _wires=wires, _cur=cur,
+                                _bid=_di_bid, _dt=step_s):
+                    src = _wires.get((_bid, "u"))
+                    u_v = float(_cur.get(src, 0.0)) if src else 0.0
+                    K_  = _bp["K"]; lo_ = _bp["lower"]; hi_ = _bp["upper"]
+                    meth_ = _bp["meth"]
+                    if meth_ == "Backward Euler":
+                        new_s = _st["s"] + K_ * u_v * _dt
+                    elif meth_.lower().startswith("trap"):
+                        new_s = _st["s"] + K_ * 0.5 * (u_v + _st["u_prev"]) * _dt
+                    else:
+                        new_s = _st["s"] + K_ * u_v * _dt
+                    _st["s"]      = max(lo_, min(hi_, new_s))
+                    _st["u_prev"] = u_v
+                pending_updates.append(_di_update)
+
+            elif btype == "ZeroOrderHold":
+                st_  = ST[bid]
+                bp_  = BP[bid]
+                cur[(bid, "y")] = st_["held"]       # emit held value
+                if t_k >= st_["next_samp"]:
+                    _zoh_bid = bid
+                    def _zoh_update(_st=st_, _bp=bp_, _wires=wires, _cur=cur,
+                                    _bid=_zoh_bid):
+                        src = _wires.get((_bid, "u"))
+                        _st["held"]      = float(_cur.get(src, 0.0)) if src else 0.0
+                        _st["next_samp"] += _bp["sample_t"]
+                    pending_updates.append(_zoh_update)
+
+            elif btype == "TransportDelay":
+                st_ = ST[bid]
+                buf = st_["buf"]
+                cur[(bid, "y")] = buf[0]            # output oldest sample
+                _td_bid = bid
+                def _td_update(_st=st_, _wires=wires, _cur=cur, _bid=_td_bid):
+                    src = _wires.get((_bid, "u"))
+                    val = float(_cur.get(src, 0.0)) if src else 0.0
+                    _st["buf"].append(val)
+                    _st["buf"].pop(0)
+                pending_updates.append(_td_update)
+
+            elif btype == "Derivative":
+                st_  = ST[bid]
+                u_v  = _gi("u")
+                cur[(bid, "y")] = (u_v - st_["u_prev"]) / step_s
+                st_["u_prev"]   = u_v
+
+            # ----------------------------------------------------------
+            # Math / signal-processing blocks
+            # ----------------------------------------------------------
+            elif btype == "Sum":
+                cur[(bid, "y")] = _gi("u0") + _gi("u1")
+
+            elif btype == "Product":
+                cur[(bid, "y")] = _gi("u0", 1.0) * _gi("u1", 1.0)
+
+            elif btype == "Gain":
+                cur[(bid, "y")] = pval(p.get("gain", "1.0")) * _gi("u")
+
+            elif btype == "Abs":
+                cur[(bid, "y")] = abs(_gi("u"))
+
+            elif btype == "Sign":
+                u_v = _gi("u")
+                cur[(bid, "y")] = 0.0 if u_v == 0.0 else (1.0 if u_v > 0.0 else -1.0)
+
+            elif btype == "Sqrt":
+                u_v  = _gi("u")
+                mode = p.get("mode", "sqrt").strip().lower()
+                if mode == "signed_sqrt":
+                    cur[(bid, "y")] = math.copysign(math.sqrt(abs(u_v)), u_v)
+                else:
+                    cur[(bid, "y")] = math.sqrt(abs(u_v))
+
+            elif btype == "Integrator":
+                st_   = ST[bid]
+                bp_   = BP[bid]
+                # Phase 1: emit stored state (loop-breaker, same as DiscreteIntegrator)
+                cur[(bid, "y")] = max(bp_["lower"], min(bp_["upper"], st_["s"]))
+                _it_bid = bid
+                def _it_update(_st=st_, _bp=bp_, _wires=wires, _cur=cur,
+                                _bid=_it_bid, _dt=step_s):
+                    src = _wires.get((_bid, "u"))
+                    u_v = float(_cur.get(src, 0.0)) if src else 0.0
+                    _st["s"] = max(_bp["lower"],
+                                   min(_bp["upper"], _st["s"] + u_v * _dt))
+                pending_updates.append(_it_update)
+
+            elif btype == "Saturation":
+                upper_ = pval(p.get("upper_limit",  "1.0"))
+                lower_ = pval(p.get("lower_limit", "-1.0"))
+                cur[(bid, "y")] = max(lower_, min(upper_, _gi("u")))
+
+            elif btype == "SaturationDynamic":
+                u_v  = _gi("u")
+                hi_  = _gi("upper", pval(p.get("default_upper",  "1.0")))
+                lo_  = _gi("lower", pval(p.get("default_lower", "-1.0")))
+                cur[(bid, "y")] = max(lo_, min(hi_, u_v))
+
+            elif btype == "DeadZone":
+                u_v    = _gi("u")
+                upper_ = pval(p.get("upper_value",  "0.5"))
+                lower_ = pval(p.get("lower_value", "-0.5"))
+                if   u_v > upper_: cur[(bid, "y")] = u_v - upper_
+                elif u_v < lower_: cur[(bid, "y")] = u_v - lower_
+                else:              cur[(bid, "y")] = 0.0
+
+            elif btype == "MinMax":
+                fn_ = p.get("function", "min").strip().lower()
+                u0_ = _gi("u0"); u1_ = _gi("u1")
+                cur[(bid, "y")] = min(u0_, u1_) if fn_ == "min" else max(u0_, u1_)
+
+            elif btype == "RelationalOperator":
+                op_  = p.get("operator", ">").strip()
+                u0_  = _gi("u0"); u1_ = _gi("u1")
+                ops_ = {">": u0_>u1_, "<": u0_<u1_, ">=": u0_>=u1_,
+                        "<=": u0_<=u1_, "==": u0_==u1_, "!=": u0_!=u1_}
+                cur[(bid, "y")] = float(ops_.get(op_, u0_ > u1_))
+
+            elif btype == "LogicalOperator":
+                op_  = p.get("operator", "AND").strip().upper()
+                a_   = bool(_gi("u0"))
+                b__  = bool(_gi("u1"))
+                ops_ = {"AND": a_ and b__, "OR": a_ or b__,
+                        "NOT": not a_, "NAND": not (a_ and b__),
+                        "NOR": not (a_ or b__), "XOR": a_ ^ b__}
+                cur[(bid, "y")] = float(ops_.get(op_, a_ and b__))
+
+            elif btype == "Switch":
+                thr_  = pval(p.get("threshold", "0.5"))
+                crit_ = p.get("criteria", ">=").strip()
+                u0_   = _gi("u0"); ctrl_ = _gi("u1"); u2_ = _gi("u2")
+                cond_ = (ctrl_ > thr_   if crit_ == ">" else
+                         ctrl_ == thr_  if crit_ == "==" else ctrl_ >= thr_)
+                cur[(bid, "y")] = u0_ if cond_ else u2_
+
+            elif btype == "MultiportSwitch":
+                ni_  = max(2, min(4, int(round(pval(p.get("num_inputs", "4"))))))
+                sel_ = int(round(_gi("sel")))
+                sel_ = max(0, min(ni_ - 1, sel_))
+                cur[(bid, "y")] = _gi(f"u{sel_}")
+
+            elif btype == "Quantizer":
+                iv_  = max(1e-12, pval(p.get("interval", "0.1")))
+                cur[(bid, "y")] = round(_gi("u") / iv_) * iv_
+
+            elif btype == "RateLimiter":
+                st_   = ST[bid]
+                bp_   = BP[bid]
+                delta = _gi("u") - st_["prev"]
+                delta = max(bp_["fl"] * step_s, min(bp_["rl"] * step_s, delta))
+                st_["prev"] += delta
+                cur[(bid, "y")] = st_["prev"]
+
+            elif btype == "CompareToConstant":
+                op_    = p.get("operator", "==").strip()
+                const_ = pval(p.get("constant", "0.0"))
+                u_v    = _gi("u")
+                ops_   = {">": u_v > const_, "<": u_v < const_,
+                          ">=": u_v >= const_, "<=": u_v <= const_,
+                          "==": u_v == const_, "!=": u_v != const_}
+                cur[(bid, "y")] = float(ops_.get(op_, u_v == const_))
+
+            elif btype == "DetectRisePositive":
+                st_   = ST[bid]
+                u_v   = _gi("u")
+                cur[(bid, "y")] = float(st_["prev"] <= 0 and u_v > 0)
+                st_["prev"]     = u_v
+
+            elif btype == "Relay":
+                st_ = ST[bid]
+                bp_ = BP[bid]
+                u_v = _gi("u")
+                if   u_v >= bp_["on_thr"]:  st_["state"] = bp_["on_val"]
+                elif u_v <= bp_["off_thr"]: st_["state"] = bp_["off_val"]
+                cur[(bid, "y")] = st_["state"]
+
+            elif btype == "Bias":
+                cur[(bid, "y")] = _gi("u") + pval(p.get("bias", "0.0"))
+
+            elif btype == "Divide":
+                u0_  = _gi("u0"); u1_ = _gi("u1")
+                eps_ = pval(p.get("eps", "1e-10"))
+                cur[(bid, "y")] = 0.0 if abs(u1_) < eps_ else u0_ / u1_
+
+            elif btype == "MathFunction":
+                u_v  = _gi("u")
+                fn_  = p.get("function", "exp").strip().lower()
+                if   fn_ == "exp":        y_v = math.exp(u_v)
+                elif fn_ == "log":        y_v = math.log(u_v) if u_v > 0 else 0.0
+                elif fn_ == "log10":      y_v = math.log10(u_v) if u_v > 0 else 0.0
+                elif fn_ == "square":     y_v = u_v * u_v
+                elif fn_ == "reciprocal": y_v = (1.0 / u_v) if abs(u_v) > 1e-12 else 0.0
+                elif fn_ == "pow10":      y_v = 10.0 ** u_v
+                elif fn_ == "pow2":       y_v = 2.0 ** u_v
+                else:                     y_v = 0.0
+                cur[(bid, "y")] = y_v
+
+            elif btype == "RoundingFunction":
+                u_v = _gi("u")
+                fn_ = p.get("function", "round").strip().lower()
+                if   fn_ == "floor": y_v = math.floor(u_v)
+                elif fn_ == "ceil":  y_v = math.ceil(u_v)
+                elif fn_ == "round": y_v = round(u_v)
+                elif fn_ == "fix":   y_v = math.trunc(u_v)
+                else:                y_v = 0.0
+                cur[(bid, "y")] = float(y_v)
+
+            elif btype == "Polynomial":
+                u_v   = _gi("u")
+                c_str = p.get("coefficients", "1 0")
+                try:
+                    coeffs_ = [float(x) for x in c_str.split()]
+                    cur[(bid, "y")] = float(np.polyval(coeffs_, u_v))
+                except Exception:
+                    cur[(bid, "y")] = 0.0
+
+            elif btype == "Lookup1D":
+                bp__ = BP[bid]
+                u_v  = _gi("u")
+                bp_a = bp__["bp"]; tbl_a = bp__["tbl"]; ext = bp__["extrap"]
+                if ext == "linear" and len(bp_a) >= 2:
+                    if u_v < bp_a[0]:
+                        sl = ((tbl_a[1]-tbl_a[0])/(bp_a[1]-bp_a[0])
+                              if bp_a[1] != bp_a[0] else 0.0)
+                        y_v = tbl_a[0] + sl * (u_v - bp_a[0])
+                    elif u_v > bp_a[-1]:
+                        sr = ((tbl_a[-1]-tbl_a[-2])/(bp_a[-1]-bp_a[-2])
+                              if bp_a[-1] != bp_a[-2] else 0.0)
+                        y_v = tbl_a[-1] + sr * (u_v - bp_a[-1])
+                    else:
+                        y_v = float(np.interp(u_v, bp_a, tbl_a))
+                else:
+                    y_v = float(np.interp(u_v, bp_a, tbl_a))
+                cur[(bid, "y")] = y_v
+
+            elif btype == "Lookup2D":
+                bp__ = BP[bid]
+                u0_v = _gi("u0"); u1_v = _gi("u1")
+                rbp_ = bp__["rbp"]; cbp_ = bp__["cbp"]; tbl_ = bp__["tbl"]
+                try:
+                    r_ = float(np.interp(u0_v, rbp_, np.arange(len(rbp_))))
+                    c_ = float(np.interp(u1_v, cbp_, np.arange(len(cbp_))))
+                    ri = int(max(0, min(int(r_), len(rbp_)-2)))
+                    ci = int(max(0, min(int(c_), len(cbp_)-2)))
+                    fr = r_ - ri; fc = c_ - ci
+                    y_v = (tbl_[ri,ci]*(1-fr)*(1-fc) + tbl_[ri+1,ci]*fr*(1-fc) +
+                           tbl_[ri,ci+1]*(1-fr)*fc    + tbl_[ri+1,ci+1]*fr*fc)
+                except Exception:
+                    y_v = 0.0
+                cur[(bid, "y")] = y_v
+
+            # ----------------------------------------------------------
+            # Filter blocks (IIR per-sample Direct Form II Transposed)
+            # ----------------------------------------------------------
+            elif btype in ("TransferFcn", "ZeroPoleGain"):
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                bz_  = bp__["bz"]; az_ = bp__["az"]
+                s_   = st_["s"]
+                u_v  = _gi("u")
+                order_ = len(az_) - 1
+                yk_  = bz_[0] * u_v + (float(s_[0]) if order_ else 0.0)
+                for j in range(order_ - 1):
+                    s_[j] = bz_[j+1]*u_v - az_[j+1]*yk_ + s_[j+1]
+                if order_:
+                    s_[order_-1] = bz_[order_]*u_v - az_[order_]*yk_
+                cur[(bid, "y")] = yk_
+
+            elif btype == "DiscreteTransferFcn":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                bz_  = bp__["bz"]; az_ = bp__["az"]
+                s_   = st_["s"]
+                u_v  = _gi("u")
+                order_ = len(az_) - 1
+                yk_  = bz_[0] * u_v + (float(s_[0]) if order_ else 0.0)
+                for j in range(order_ - 1):
+                    s_[j] = bz_[j+1]*u_v - az_[j+1]*yk_ + s_[j+1]
+                if order_:
+                    s_[order_-1] = bz_[order_]*u_v - az_[order_]*yk_
+                cur[(bid, "y")] = yk_
+
+            elif btype == "PID":
+                st_   = ST[bid]
+                bp__  = BP[bid]
+                e_    = _gi("u")
+                KdN_  = bp__["Kd"] * bp__["N"]
+                N_dt_ = min(bp__["N"] * step_s, 1.99)
+                st_["integ"] += bp__["Ki"] * e_ * step_s
+                d_out_        = KdN_ * (e_ - st_["d_st"])
+                st_["d_st"]  += N_dt_ * (e_ - st_["d_st"])
+                raw_          = bp__["Kp"] * e_ + st_["integ"] + d_out_
+                cur[(bid, "y")] = max(bp__["lower"], min(bp__["upper"], raw_))
+
+            elif btype == "StateSpace":
+                bp__ = BP[bid]
+                if bp__ is None:
+                    cur[(bid, "y")] = 0.0
+                else:
+                    st_  = ST[bid]
+                    x_   = st_["x"]
+                    u_v  = _gi("u")
+                    y_v  = float(bp__["C"] @ x_) + bp__["D"] * u_v
+                    st_["x"] = bp__["Ad"] @ x_ + bp__["Bd"] * u_v
+                    cur[(bid, "y")] = y_v
+
+            elif btype == "DiscreteStateSpace":
+                bp__ = BP[bid]
+                if bp__ is None:
+                    cur[(bid, "y")] = 0.0
+                else:
+                    st_  = ST[bid]
+                    x_   = st_["x"]
+                    u_v  = _gi("u")
+                    y_v  = float(bp__["Cd"] @ x_) + bp__["Dd"] * u_v
+                    st_["x"] = bp__["Ad"] @ x_ + bp__["Bd"] * u_v
+                    cur[(bid, "y")] = y_v
+
+            elif btype == "FIRFilter":
+                st_    = ST[bid]
+                bp__   = BP[bid]
+                buf_   = st_["buf"]
+                coeffs_= bp__["coeffs"]
+                u_v    = _gi("u")
+                # Shift register: buf[0] = u[k], buf[1] = u[k-1], …
+                buf_   = np.roll(buf_, 1)
+                buf_[0] = u_v
+                st_["buf"] = buf_
+                cur[(bid, "y")] = float(np.dot(coeffs_, buf_))
+
+            elif btype == "BiquadFilter":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                u_v  = _gi("u")
+                w0_  = u_v - bp__["a1"] * st_["w1"] - bp__["a2"] * st_["w2"]
+                y_v  = bp__["b0"]*w0_ + bp__["b1"]*st_["w1"] + bp__["b2"]*st_["w2"]
+                st_["w2"] = st_["w1"]
+                st_["w1"] = w0_
+                cur[(bid, "y")] = y_v
+
+            elif btype == "RunningRMS":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                w_   = bp__["w"]
+                u_v  = _gi("u")
+                old_ = float(st_["buf"][st_["idx"]])
+                st_["sum_sq"] += u_v*u_v - old_*old_
+                st_["buf"][st_["idx"]] = u_v
+                st_["idx"] = (st_["idx"] + 1) % w_
+                cur[(bid, "y")] = math.sqrt(max(0.0, st_["sum_sq"] / w_))
+
+            elif btype == "MovingAverage":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                w_   = bp__["w"]
+                u_v  = _gi("u")
+                old_ = float(st_["buf"][st_["idx"]])
+                st_["acc"] += u_v - old_
+                st_["buf"][st_["idx"]] = u_v
+                st_["idx"] = (st_["idx"] + 1) % w_
+                cur[(bid, "y")] = st_["acc"] / w_
+
+            elif btype == "MedianFilter":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                buf_ = st_["buf"]
+                buf_.append(_gi("u"))
+                if len(buf_) > bp__["w"]:
+                    buf_.pop(0)
+                cur[(bid, "y")] = float(np.median(buf_))
+
+            elif btype == "NCO":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                phi_ = st_["phi"]
+                cur[(bid, "sin_out")] = bp__["amp"] * math.sin(phi_)
+                cur[(bid, "cos_out")] = bp__["amp"] * math.cos(phi_)
+                st_["phi"] = phi_ + 2.0 * math.pi * _gi("freq") * step_s
+
+            elif btype == "PeakDetector":
+                st_  = ST[bid]
+                bp__ = BP[bid]
+                u_v  = _gi("u")
+                val_ = abs(u_v) if bp__["mode"] == "abs_max" else u_v
+                st_["peak"] = max(val_, st_["peak"] - bp__["decay"] * step_s)
+                cur[(bid, "y")] = st_["peak"]
+
+            # ---- PythonFcn --------------------------------------------------
+            elif btype == "PythonFcn":
+                ni_     = max(1, min(4, int(float(p.get("num_inputs", "1")))))
+                code_   = p.get("code", "u[0]").strip()
+                _ports  = ["u0", "u1", "u2", "u3"][:ni_]
+                u_list  = []
+                for _port in _ports:
+                    _src = wires.get((bid, _port))
+                    u_list.append(float(cur.get(_src, 0.0)) if _src else 0.0)
+                _ns = {
+                    "u": u_list,
+                    "t": t_k,
+                    "math": math,
+                    "np": np,
+                    "numpy": np,
+                    "abs": abs,
+                    "min": min,
+                    "max": max,
+                    "round": round,
+                    "int": int,
+                    "float": float,
+                    "bool": bool,
+                }
+                try:
+                    # Try eval first (expression mode)
+                    _result = eval(code_, _ns)  # noqa: S307
+                    cur[(bid, "y")] = float(_result)
+                except SyntaxError:
+                    # Exec mode: user wrote statements; last assignment to 'y' wins
+                    try:
+                        exec(code_, _ns)  # noqa: S102
+                        cur[(bid, "y")] = float(_ns.get("y", 0.0))
+                    except Exception:
+                        cur[(bid, "y")] = 0.0
+                except Exception:
+                    cur[(bid, "y")] = 0.0
+
+            # ---- WeightedSum ------------------------------------------------
+            elif btype == "WeightedSum":
+                bp__ = BP[bid]
+                ports_ = [f"u{i}" for i in range(bp__["ni"])]
+                y_ = sum(bp__["gains"][i] * _gi(ports_[i])
+                         for i in range(bp__["ni"]))
+                cur[(bid, "y")] = y_
+
+            # ---- PlantODE ---------------------------------------------------
+            elif btype == "PlantODE":
+                bp__   = BP[bid]
+                st_    = ST[bid]
+                _pu    = _gi("u")
+                _px    = list(st_["x"])
+                _ph    = step_s
+                _peqs  = bp__["eqs"]
+
+                def _plant_rhs(_pxi, _pui, _pti):
+                    _pns = {}
+                    exec(  # noqa: S102
+                        "import math\nx=" + repr(_pxi) + "\nu=" + repr(_pui)
+                        + "\nt=" + repr(_pti) + "\n", _pns)
+                    return [eval(_pe, _pns) for _pe in _peqs]  # noqa: S307
+
+                _pt = float(t_k)   # ensure plain float (numpy.float64 repr fails in exec)
+                _pu_f = float(_pu)
+                try:
+                    _pk1 = _plant_rhs(_px, _pu_f, _pt)
+                    _pk2 = _plant_rhs(
+                        [xi+_ph/2*ki for xi, ki in zip(_px, _pk1)], _pu_f, _pt+_ph/2)
+                    _pk3 = _plant_rhs(
+                        [xi+_ph/2*ki for xi, ki in zip(_px, _pk2)], _pu_f, _pt+_ph/2)
+                    _pk4 = _plant_rhs(
+                        [xi+_ph*ki   for xi, ki in zip(_px, _pk3)], _pu_f, _pt+_ph)
+                    _pxn = [xi + _ph/6*(w1+2*w2+2*w3+w4)
+                            for xi, w1, w2, w3, w4
+                            in zip(_px, _pk1, _pk2, _pk3, _pk4)]
+                except Exception:
+                    _pxn = _px
+                st_["x"] = _pxn
+                for _pi in range(min(bp__["nout"], 4)):
+                    cur[(bid, f"y{_pi}")] = float(_pxn[_pi]) if _pi < len(_pxn) else 0.0
+
+            # ---- AngleUnwrap ------------------------------------------------
+            elif btype == "AngleUnwrap":
+                bp__ = BP[bid]
+                st_  = ST[bid]
+                u_v  = _gi("u")
+                diff_ = u_v - st_["prev"]
+                half_ = bp__["half"]
+                full_ = bp__["full"]
+                if diff_ > half_:
+                    st_["offset"] -= full_
+                elif diff_ < -half_:
+                    st_["offset"] += full_
+                st_["prev"] = u_v
+                cur[(bid, "y")] = u_v + st_["offset"]
+
+            # ---- HBridgeOut -------------------------------------------------
+            elif btype == "HBridgeOut":
+                bp__  = BP[bid]
+                u_v   = _gi("u")
+                abs_u = abs(u_v)
+                out_  = u_v if abs_u > bp__["dead_band"] else 0.0
+                cur[(bid, "pin")] = out_
+
+            # ---- DiscreteIntegratorAW ---------------------------------------
+            elif btype == "DiscreteIntegratorAW":
+                bp__ = BP[bid]
+                st_  = ST[bid]
+                u_v  = _gi("u")
+                # Phase 1: emit stored (saturated) state
+                sat_ = max(bp__["lower"], min(bp__["upper"], st_["s"]))
+                cur[(bid, "y")] = sat_
+                # Phase 2 (deferred): integrate with back-calculation AW
+                def _diaw_update(
+                    _st=st_, _bp=bp__, _u=u_v, _sat=sat_, _h=step_s
+                ):
+                    kaw_   = _bp["kaw"]
+                    bc_    = kaw_ * (_sat - _st["s"])
+                    _st["s"] += _bp["K"] * _u * _h + bc_ * _h
+                pending_updates.append(_diaw_update)
+
+            # Sink blocks — no output port needed in cur
+            # (GpioOut, DAC, PWMOut, UARTSend, I2CWrite, Scope,
+            #  ToWorkspace are handled in the display pass below)
+
+            # Update held-output store for multi-rate blocks
+            if _blk_period > 1:
+                for _ck in list(cur):
+                    if _ck[0] == bid:
+                        _held_output[_ck] = cur[_ck]
+
+        # Phase 2: apply deferred state updates for delay blocks now that
+        # all outputs for this sample have been computed.
+        for _upd in pending_updates:
+            _upd()
+
+        # Accumulate scalar outputs → full arrays
+        for key, val in cur.items():
+            if key not in full:
+                full[key] = np.empty(n)
+            full[key][k] = val
+
+    # -----------------------------------------------------------------------
+    # ToWorkspace: save to Python workspace
+    # -----------------------------------------------------------------------
     for b in model["blocks"]:
         if b["type"] == "ToWorkspace":
             var_name = b["params"].get("variable_name", "yout").strip() or "yout"
@@ -1202,16 +5495,19 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
 
             src = wires.get((b["id"], "u"))
             if src is not None:
-                sig = outs.get(src)
+                sig = full.get(src)
                 if sig is not None:
                     sig_d   = sig[::decim][-max_pts:]
-                    time_d  = t[::decim][-max_pts:]
+                    time_d  = t_arr[::decim][-max_pts:]
                     WORKSPACE.globals[var_name] = sig_d
                     if save_t:
                         WORKSPACE.globals[f"{var_name}_t"] = time_d
-                    # keep the trimmed slice so the display loop below can
-                    # show it in the Simulate Scope tab at the correct time axis
-                    outs[(b["id"], "_saved")] = (time_d, sig_d)
+                    full[(b["id"], "_saved")] = (time_d, sig_d)
+
+    # -----------------------------------------------------------------------
+    # Build display dict for the scope / simulate tab
+    # -----------------------------------------------------------------------
+    outs = full   # alias so the display logic is identical to the old code
 
     display: Dict[str, np.ndarray] = {}
     for b in model["blocks"]:
@@ -1229,22 +5525,38 @@ def simulate_model(model: dict, duration_s: float = 2.0, step_s: float = 0.001
                 if sig is not None:
                     thr = pval(b["params"]["threshold"])
                     display[f"{b['id']}.pin"] = (sig > thr).astype(float)
+        elif b["type"] in ("DAC", "PWMOut"):
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
+        elif b["type"] == "UARTSend":
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
+        elif b["type"] == "I2CWrite":
+            key = (b["id"], "u")
+            if key in wires:
+                sig = outs.get(wires[key])
+                if sig is not None:
+                    display[f"{b['id']}.u"] = sig
         elif b["type"] == "ToWorkspace":
             saved = outs.get((b["id"], "_saved"))
             if saved is not None:
                 var_name = b["params"].get("variable_name", "yout").strip() or "yout"
                 _tw_t, _tw_sig = saved
-                # Pad/trim to full time axis length for the scope plot
-                # (decimated data: just resample to full grid via interpolation
-                # so the scope x-axis lines up with other channels).
                 if len(_tw_t) == n:
                     display[f"{var_name} [{b['id']}]"] = _tw_sig
                 else:
-                    display[f"{var_name} [{b['id']}]"] = np.interp(t, _tw_t, _tw_sig)
+                    display[f"{var_name} [{b['id']}]"] = np.interp(t_arr, _tw_t, _tw_sig)
 
     if not display:
-        display = {k[0] + "." + k[1]: v for k, v in outs.items()}
-    return t, display
+        display = {k[0] + "." + k[1]: v for k, v in outs.items()
+                   if not k[1].startswith("_")}
+    return t_arr, display
 
 
 # ---------------------------------------------------------------------------
@@ -1357,10 +5669,12 @@ class MainWindow(QMainWindow):
         editor_layout = QHBoxLayout(editor_widget)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         self.palette = BlockPalette()
-        self.palette.setMaximumWidth(180)
+        self.palette.setMinimumWidth(160)
+        self.palette.setMaximumWidth(220)
         self.param_panel = ParamPanel()
         self.param_panel.setMinimumWidth(240)
         self.scene.block_selected.connect(self.param_panel.set_block)
+        self.param_panel.error_block_selected.connect(self._select_block_by_id)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.palette)
@@ -1397,14 +5711,21 @@ class MainWindow(QMainWindow):
         self._make_statusbar()
         self._make_menu()
 
-        # current board
-        self.board = "NUCLEO-F446RE"
-        self.step_ms = 1  # model step
+        # current board / scheduler
+        self.board    = "NUCLEO-F446RE"
+        self.step_ms  = 1
+        self.use_rtos = False
 
         # worker
         self._worker: Optional[BuildFlashWorker] = None
 
+        # file tracking
+        self._current_file: Optional[Path] = None
+        self._is_dirty: bool = False
+        self.scene.changed.connect(self._mark_dirty)
+
         self._example_model()
+        self._set_clean(None)   # example isn't a real saved file
 
     # --- UI ---------------------------------------------------------------
 
@@ -1428,6 +5749,16 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.step_spin)
 
         tb.addSeparator()
+        tb.addWidget(QLabel(" Scheduler: "))
+        self.rtos_box = QComboBox()
+        self.rtos_box.addItems(["Bare-metal", "FreeRTOS"])
+        self.rtos_box.setToolTip(
+            "Bare-metal: SysTick flag-polling super-loop (no OS overhead)\n"
+            "FreeRTOS:   CMSIS-RTOS v2 task with osDelayUntil() for precise timing")
+        self.rtos_box.currentTextChanged.connect(self._rtos_changed)
+        tb.addWidget(self.rtos_box)
+
+        tb.addSeparator()
         build_act = QAction("Build", self)
         build_act.triggered.connect(lambda: self._build_and_flash(flash=False))
         tb.addAction(build_act)
@@ -1449,15 +5780,43 @@ class MainWindow(QMainWindow):
         sb.showMessage("Ready.")
 
     def _make_menu(self) -> None:
+        from PyQt5.QtGui import QKeySequence
         m = self.menuBar()
         file_m = m.addMenu("&File")
-        save_a = QAction("Save Model...", self); save_a.triggered.connect(self.save_model)
-        open_a = QAction("Open Model...", self); open_a.triggered.connect(self.open_model)
-        export_a = QAction("Export Generated C...", self); export_a.triggered.connect(self.export_c)
-        file_m.addAction(open_a); file_m.addAction(save_a); file_m.addSeparator()
-        file_m.addAction(export_a)
+
+        new_a = QAction("&New", self)
+        new_a.setShortcut(QKeySequence.New)
+        new_a.triggered.connect(self.new_model)
+        file_m.addAction(new_a)
+
         file_m.addSeparator()
-        quit_a = QAction("Quit", self); quit_a.triggered.connect(self.close)
+
+        open_a = QAction("&Open...", self)
+        open_a.setShortcut(QKeySequence.Open)
+        open_a.triggered.connect(self.open_model)
+        file_m.addAction(open_a)
+
+        save_a = QAction("&Save", self)
+        save_a.setShortcut(QKeySequence.Save)
+        save_a.triggered.connect(self.save_model)
+        file_m.addAction(save_a)
+
+        save_as_a = QAction("Save &As...", self)
+        save_as_a.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_as_a.triggered.connect(self.save_model_as)
+        file_m.addAction(save_as_a)
+
+        file_m.addSeparator()
+
+        export_a = QAction("Export Generated C...", self)
+        export_a.triggered.connect(self.export_c)
+        file_m.addAction(export_a)
+
+        file_m.addSeparator()
+
+        quit_a = QAction("&Quit", self)
+        quit_a.setShortcut(QKeySequence.Quit)
+        quit_a.triggered.connect(self.close)
         file_m.addAction(quit_a)
 
         help_m = m.addMenu("&Help")
@@ -1469,11 +5828,24 @@ class MainWindow(QMainWindow):
         ))
         help_m.addAction(about_a)
 
+    # --- window events ----------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        if self._confirm_discard():
+            event.accept()
+        else:
+            event.ignore()
+
     # --- actions ----------------------------------------------------------
 
     def _board_changed(self, name: str) -> None:
         self.board = name
         self.statusBar().showMessage(f"Board: {name}")
+
+    def _rtos_changed(self, text: str) -> None:
+        self.use_rtos = (text == "FreeRTOS")
+        label = "FreeRTOS (CMSIS-RTOS v2)" if self.use_rtos else "Bare-metal"
+        self.statusBar().showMessage(f"Scheduler: {label}")
 
     def _example_model(self) -> None:
         """Drop a default SquareWave -> GpioOut example so the UI isn't empty."""
@@ -1485,46 +5857,106 @@ class MainWindow(QMainWindow):
         self.scene.add_connection(b1.output_ports[0], b2.input_ports[0])
         self.scene.add_connection(b1.output_ports[0], b3.input_ports[0])
 
+    # ------------------------------------------------------------------
+    # Dirty / title helpers
+    # ------------------------------------------------------------------
+
+    def _mark_dirty(self, _=None) -> None:
+        if not self._is_dirty:
+            self._is_dirty = True
+            self._update_title()
+
+    def _set_clean(self, file_path: Optional[Path]) -> None:
+        self._current_file = file_path
+        self._is_dirty = False
+        self._update_title()
+
+    def _update_title(self) -> None:
+        name = self._current_file.name if self._current_file else "Untitled"
+        dirty = " \u2022" if self._is_dirty else ""   # bullet = unsaved
+        self.setWindowTitle(f"{name}{dirty} — {APP_NAME} {VERSION}")
+
+    def _confirm_discard(self) -> bool:
+        """Return True if it is safe to discard the current model.
+
+        If there are unsaved changes, prompts the user.  Returns False if the
+        user clicks Cancel.
+        """
+        if not self._is_dirty:
+            return True
+        reply = QMessageBox.question(
+            self, "Unsaved changes",
+            "The current diagram has unsaved changes.\n"
+            "Do you want to discard them?",
+            QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return reply == QMessageBox.Discard
+
+    # ------------------------------------------------------------------
+    # File actions
+    # ------------------------------------------------------------------
+
+    def new_model(self) -> None:
+        if not self._confirm_discard():
+            return
+        self.scene.load_from_dict({"blocks": [], "connections": []})
+        self.param_panel.clear_errors()
+        self._set_clean(None)
+        self.statusBar().showMessage("New diagram.")
+
     def save_model(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save Model", "", "JSON (*.json)")
+        """Save to the current file; fall back to Save As if no file is set."""
+        if self._current_file is None:
+            self.save_model_as()
+            return
+        self._write_model(self._current_file)
+
+    def save_model_as(self) -> None:
+        """Always prompt for a filename."""
+        default = str(self._current_file) if self._current_file else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Model As", default,
+            "STM32 Block Diagram (*.stmbd);;JSON (*.json);;All files (*)")
         if not path:
             return
+        self._write_model(Path(path))
+
+    def _write_model(self, path: Path) -> None:
         data = self.scene.to_model()
-        data["board"] = self.board
-        data["step_ms"] = self.step_ms
-        Path(path).write_text(json.dumps(data, indent=2))
-        self.statusBar().showMessage(f"Saved {path}")
+        data["board"]    = self.board
+        data["step_ms"]  = self.step_ms
+        data["use_rtos"] = self.use_rtos
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._set_clean(path)
+        self.statusBar().showMessage(f"Saved: {path}")
 
     def open_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open Model", "", "JSON (*.json)")
+        if not self._confirm_discard():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Model", "",
+            "STM32 Block Diagram (*.stmbd);;JSON (*.json);;All files (*)")
         if not path:
             return
-        data = json.loads(Path(path).read_text())
-        # Rebuild
-        self.scene.clear()
-        self.scene.__init__()
-        self.view.setScene(self.scene)
-        self.scene.block_selected.connect(self.param_panel.set_block)
-        positions = {}
-        for b in data["blocks"]:
-            item = self.scene.add_block_by_type(b["type"], QPointF(b["x"], b["y"]))
-            # keep id consistent
-            self.scene.blocks.pop(item.instance.block_id, None)
-            item.instance.block_id = b["id"]
-            item.instance.params.update(b.get("params", {}))
-            self.scene.blocks[b["id"]] = item
-            positions[b["id"]] = item
-        for c in data["connections"]:
-            src_item = positions[c["src_block"]]
-            dst_item = positions[c["dst_block"]]
-            src_port = next(p for p in src_item.output_ports if p.port_name == c["src_port"])
-            dst_port = next(p for p in dst_item.input_ports if p.port_name == c["dst_port"])
-            self.scene.add_connection(src_port, dst_port)
+        self._load_file(Path(path))
+
+    def _load_file(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QMessageBox.critical(self, "Open failed", str(exc))
+            return
+        self.scene.load_from_dict(data)
         self.board = data.get("board", "NUCLEO-F446RE")
         self.board_box.setCurrentText(self.board)
         self.step_ms = int(data.get("step_ms", 1))
         self.step_spin.setValue(self.step_ms)
-        self.statusBar().showMessage(f"Loaded {path}")
+        self.use_rtos = bool(data.get("use_rtos", False))
+        self.rtos_box.setCurrentText("FreeRTOS" if self.use_rtos else "Bare-metal")
+        self._clear_validation_errors()
+        self._set_clean(path)
+        self.statusBar().showMessage(f"Opened: {path}")
 
     # --- simulate / export / build ---------------------------------------
 
@@ -1533,12 +5965,59 @@ class MainWindow(QMainWindow):
             self._sim_debounce.start()
 
     def _auto_simulate(self) -> None:
-        self.on_simulate()
+        self.on_simulate(switch_tab=False)
 
-    def on_simulate(self) -> None:
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+
+    def _select_block_by_id(self, block_id: str) -> None:
+        """Select and centre-view a block by its ID (called from error panel)."""
+        item = self.scene.blocks.get(block_id)
+        if item is None:
+            return
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self.view.centerOn(item)
+        self.param_panel.set_block(item)
+
+    def _clear_validation_errors(self) -> None:
+        """Remove all error highlights and clear the error panel."""
+        for item in self.scene.blocks.values():
+            item.set_error_highlight(False)
+        self.param_panel.clear_errors()
+
+    def _show_validation_errors(self, errors: List[ValidationError]) -> None:
+        """Highlight faulty blocks and populate the error panel."""
+        bad_ids = {e.block_id for e in errors}
+        for bid, item in self.scene.blocks.items():
+            item.set_error_highlight(bid in bad_ids)
+        self.param_panel.show_errors(errors)
+        # Switch to the Block Diagram tab so the user sees the highlights
+        self.tabs.setCurrentIndex(0)
+        self.statusBar().showMessage(
+            f"Simulation blocked — {len(errors)} parameter error"
+            f"{'s' if len(errors) != 1 else ''} found."
+        )
+
+    # ------------------------------------------------------------------
+    # Simulate
+    # ------------------------------------------------------------------
+
+    def on_simulate(self, switch_tab: bool = True) -> None:
         model = self.scene.to_model()
         model["board"] = self.board
         model["step_ms"] = self.step_ms
+
+        # Always clear previous error state first.
+        self._clear_validation_errors()
+
+        # Validate all block parameters before touching the simulator.
+        errors = validate_model(model, WORKSPACE)
+        if errors:
+            self._show_validation_errors(errors)
+            return
+
         duration = self.sim_scope_tab.duration_spin.value()
         try:
             t, sigs = simulate_model(model, duration_s=duration,
@@ -1547,7 +6026,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Simulation error", str(e))
             return
         self.sim_scope_tab.show_simulation(t, sigs)
-        self.tabs.setCurrentWidget(self.sim_scope_tab)
+        if switch_tab:
+            self.tabs.setCurrentWidget(self.sim_scope_tab)
         # Collect the names written by ToWorkspace blocks, refresh the
         # variable table, and echo the names to the command window so the
         # user knows what landed in the workspace.
@@ -1569,8 +6049,9 @@ class MainWindow(QMainWindow):
 
     def _generate_project(self, out_dir: Path) -> Path:
         model = self.scene.to_model()
-        model["board"] = self.board
-        model["step_ms"] = self.step_ms
+        model["board"]    = self.board
+        model["step_ms"]  = self.step_ms
+        model["use_rtos"] = self.use_rtos
         proj = generate_project(out_dir, model, WORKSPACE)
         return proj
 

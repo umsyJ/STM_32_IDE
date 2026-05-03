@@ -3,3 +3,5 @@ pyqtgraph
 pyserial
 numpy
 matplotlib
+control
+opencv-python

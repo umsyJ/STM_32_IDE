@@ -24,14 +24,16 @@ Keyboard shortcuts
 
 from __future__ import annotations
 
+import importlib
 import os
 import re
+import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QDir, QRegularExpression, QRect, QSize, Qt
+from PyQt5.QtCore import QDir, QRegularExpression, QRect, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QFont, QKeySequence, QPainter, QSyntaxHighlighter,
     QTextCharFormat, QTextCursor,
@@ -641,6 +643,75 @@ class VariableTable(QTableWidget):
 # Full MATLAB-style widget
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Startup library auto-import / auto-install
+# ---------------------------------------------------------------------------
+
+# (importable_module_path, workspace_alias, pip_package_name, friendly_name)
+_STARTUP_LIBS: List[Tuple[str, str, str, str]] = [
+    ("numpy",             "np",  "numpy",            "NumPy"),
+    ("matplotlib.pyplot", "plt", "matplotlib",       "Matplotlib"),
+    ("control",           "ct",  "control",          "Python Control"),
+    ("cv2",               "cv2", "opencv-python",    "OpenCV"),
+]
+
+
+class _StartupImportWorker(QThread):
+    """Background thread: upgrades all startup libs via pip then imports them.
+
+    Every time the IDE opens, each package is upgraded to the latest available
+    version.  If a package is not yet installed it is installed first.  If the
+    upgrade fails (e.g. no internet) the existing installed version is used.
+
+    Signals
+    -------
+    line(str)
+        Each log line to append to the command window (thread-safe via Qt).
+    done(dict)
+        Emitted once when all packages are processed.  Maps alias → module
+        for every successfully imported library.
+    """
+
+    line = pyqtSignal(str)
+    done = pyqtSignal(object)   # dict[str, module]
+
+    def run(self) -> None:
+        imported: Dict[str, object] = {}
+
+        for mod_path, alias, pkg, friendly in _STARTUP_LIBS:
+            # ---- always upgrade (installs if missing, upgrades if present) --
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     "--upgrade", "--quiet", pkg],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if proc.returncode != 0:
+                    tail = (proc.stderr.strip().splitlines() or [""])[-1]
+                    self.line.emit(
+                        f"%   [!!]  pip upgrade {pkg} failed: {tail}"
+                    )
+                    # Fall through — import whatever version is already installed
+            except Exception as exc:
+                self.line.emit(f"%   [!!]  Could not run pip: {exc}")
+
+            # ---- import (picks up the just-upgraded version) ----------------
+            try:
+                mod = importlib.import_module(mod_path)
+                ver = getattr(mod, "__version__", "")
+                ver_str = f" {ver}" if ver else ""
+                self.line.emit(f"%   [ok]  {friendly}{ver_str}  ->  {alias}")
+                imported[alias] = mod
+            except ImportError as exc:
+                self.line.emit(f"%   [!!]  {friendly} unavailable: {exc}")
+
+        self.done.emit(imported)
+
+
+# ---------------------------------------------------------------------------
+# Main workspace widget
+# ---------------------------------------------------------------------------
+
 class MatlabWorkspace(QWidget):
     """Top-level replacement for the old Python tab."""
 
@@ -728,6 +799,33 @@ class MatlabWorkspace(QWidget):
             "% are visible to every block parameter in the diagram.\n"
             "% Try:  Ts = 0.001     then reference 'Ts' in any parameter field."
         )
+
+        # Kick off background library imports after the event loop starts
+        self._startup_worker: Optional[_StartupImportWorker] = None
+        QTimer.singleShot(200, self._start_startup_imports)
+
+    # --- startup library imports ------------------------------------------
+
+    def _start_startup_imports(self) -> None:
+        self.command.output.appendPlainText(
+            "\n% -- Startup imports (upgrading to latest) ---------------"
+        )
+        self._startup_worker = _StartupImportWorker()
+        self._startup_worker.line.connect(self.command.output.appendPlainText)
+        self._startup_worker.done.connect(self._on_startup_imports_done)
+        self._startup_worker.start()
+
+    def _on_startup_imports_done(self, imported: dict) -> None:
+        if imported:
+            WORKSPACE.globals.update(imported)
+            self.var_table.refresh()
+        n_ok  = len(imported)
+        n_all = len(_STARTUP_LIBS)
+        status = "all OK" if n_ok == n_all else f"{n_ok}/{n_all} succeeded"
+        self.command.output.appendPlainText(
+            f"% -- {status} " + "-" * max(0, 47 - len(status))
+        )
+        self.command.output.moveCursor(QTextCursor.End)
 
     # --- callbacks --------------------------------------------------------
 
