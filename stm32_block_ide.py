@@ -1625,11 +1625,13 @@ _BLOCK_SYMBOL: Dict[str, str] = {
 }
 
 
-def _draw_block_symbol(painter: QPainter, rect: QRectF, type_name: str) -> None:
+def _draw_block_symbol(painter: QPainter, rect: QRectF,
+                        type_name: str, params: dict = None) -> None:
     """Draw a representative icon inside *rect* for the given block type.
 
     Waveform-generating source blocks get a mini drawn waveform.
     All other blocks get a bold text glyph from ``_BLOCK_SYMBOL``.
+    *params* is the block's live param dict; used by Gain to show the actual value.
     """
     import math as _m
 
@@ -1728,12 +1730,19 @@ def _draw_block_symbol(painter: QPainter, rect: QRectF, type_name: str) -> None:
             QPointF(R - 6,   cy),
         ])
         painter.drawPolygon(tri)
-        # "K" label inside
-        f = QFont(); f.setPointSize(9); f.setBold(True)
+        # Label: show the actual gain value (or variable name) like Simulink
+        gain_raw = params.get("gain", "1.0") if params else "1.0"
+        try:
+            v = float(gain_raw)
+            gain_lbl = str(int(v)) if v == int(v) else f"{v:.3g}"
+        except (ValueError, TypeError):
+            gain_lbl = gain_raw          # workspace variable — show name as-is
+        font_size = 7 if len(gain_lbl) > 4 else 9
+        f = QFont(); f.setPointSize(font_size); f.setBold(True)
         painter.setFont(f)
         painter.setPen(QPen(sym_col))
         painter.drawText(QRectF(L + 8, cy - H * 0.28, W * 0.45, H * 0.56),
-                         Qt.AlignCenter, "K")
+                         Qt.AlignCenter, gain_lbl)
 
     # --------------------------------------------------- Integrator (drawn ∫)
     elif type_name == "Integrator":
@@ -2151,7 +2160,8 @@ class BlockItem(QGraphicsRectItem):
             W - 8,
             H * 0.46,
         )
-        _draw_block_symbol(painter, sym_rect, self.instance.spec.type_name)
+        _draw_block_symbol(painter, sym_rect, self.instance.spec.type_name,
+                           self.instance.params)
 
         # ── Block ID (bottom strip, dimmed) ───────────────────────────────────
         f_id = QFont(); f_id.setPointSize(7)
@@ -2492,6 +2502,11 @@ class BlockScene(QGraphicsScene):
 
     block_selected = pyqtSignal(object)  # BlockItem or None
 
+    # Class-level clipboard — persists across operations, shared within one process.
+    # {"blocks": [dict, ...], "connections": [dict, ...]}
+    _clipboard:    dict = {}
+    _paste_offset: int  = 0   # stagger counter: +20px per successive paste
+
     def __init__(self) -> None:
         super().__init__()
         self.setBackgroundBrush(QBrush(QColor("#2b2b2b")))
@@ -2649,7 +2664,88 @@ class BlockScene(QGraphicsScene):
                 elif isinstance(it, ConnectionItem):
                     self.remove_connection_item(it)
             return
+        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self._copy_selected()
+            return
+        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            self._paste_clipboard()
+            return
         super().keyPressEvent(event)
+
+    def _copy_selected(self) -> None:
+        """Ctrl+C — serialise selected blocks + internal wires to the class clipboard."""
+        sel_blocks = [it for it in self.selectedItems() if isinstance(it, BlockItem)]
+        if not sel_blocks:
+            return
+        sel_ids = {b.instance.block_id for b in sel_blocks}
+        block_dicts = [b.instance.to_dict() for b in sel_blocks]
+        # Only keep connections where BOTH endpoints are inside the selection.
+        conn_dicts = [
+            {"src_block": c.src_block, "src_port": c.src_port,
+             "dst_block": c.dst_block, "dst_port": c.dst_port}
+            for c in self.connections
+            if c.src_block in sel_ids and c.dst_block in sel_ids
+        ]
+        BlockScene._clipboard    = {"blocks": block_dicts, "connections": conn_dicts}
+        BlockScene._paste_offset = 0   # reset stagger so first paste lands at +20 px
+
+    def _paste_clipboard(self) -> None:
+        """Ctrl+V — duplicate clipboard blocks with new IDs; restore internal wires."""
+        if not BlockScene._clipboard:
+            return
+        STEP = 20
+        BlockScene._paste_offset += 1
+        off = STEP * BlockScene._paste_offset   # 20, 40, 60 … px stagger
+
+        id_map:    dict = {}   # old block_id → new block_id
+        new_items: list = []
+
+        # ── 1. Create new blocks at offset positions ──────────────────────
+        for bd in BlockScene._clipboard["blocks"]:
+            tname  = bd["type"]
+            new_id = self.next_id(tname)
+            id_map[bd["id"]] = new_id
+            spec = BLOCK_CATALOG[tname]
+            inst = BlockInstance(
+                spec=spec, block_id=new_id,
+                x=bd["x"] + off, y=bd["y"] + off,
+                params=dict(bd["params"]),
+            )
+            inst.sample_time_ms = int(bd.get("sample_time_ms", 0))
+            w = float(bd.get("width",  0.0))
+            h = float(bd.get("height", 0.0))
+            if w > 0:
+                inst.width  = w
+            if h > 0:
+                inst.height = h
+            item = BlockItem(inst)
+            self.addItem(item)
+            self.blocks[new_id] = item
+            new_items.append(item)
+
+        # ── 2. Re-wire connections that were internal to the copied group ──
+        for cd in BlockScene._clipboard["connections"]:
+            src_id = id_map.get(cd["src_block"])
+            dst_id = id_map.get(cd["dst_block"])
+            if not (src_id and dst_id):
+                continue
+            src_item = self.blocks.get(src_id)
+            dst_item = self.blocks.get(dst_id)
+            if not (src_item and dst_item):
+                continue
+            src_port = next(
+                (p for p in src_item.output_ports if p.port_name == cd["src_port"]),
+                None)
+            dst_port = next(
+                (p for p in dst_item.input_ports  if p.port_name == cd["dst_port"]),
+                None)
+            if src_port and dst_port:
+                self.add_connection(src_port, dst_port)
+
+        # ── 3. Select the newly pasted blocks so the user can drag them ───
+        self.clearSelection()
+        for item in new_items:
+            item.setSelected(True)
 
     # --- serialization ----------------------------------------------------
 
